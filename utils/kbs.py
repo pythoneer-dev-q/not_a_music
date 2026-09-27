@@ -129,7 +129,7 @@ async def get_search_kb(items: list, query: str, page: int, pages_all: int, orig
             builder.button(text=text, callback_data=ids[i])
 
 
-    builder.adjust(*([3] * len(items)))
+    builder.adjust(1)
 
     nav = []
     idx = 0
