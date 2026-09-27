@@ -1,3 +1,4 @@
+import asyncio
 import time
 from typing import Union
 
@@ -7,6 +8,18 @@ from aiogram.exceptions import TelegramBadRequest
 import database.bot_db as bot_db
 from utils import kbs
 from utils.i18n import t
+
+# Ссылки на фоновые задачи держим здесь же — иначе GC уничтожит задачу до
+# завершения и в логах появится «Task was destroyed but it is pending».
+_background: set = set()
+
+
+def spawn(coro):
+    """Запуск фоновой задачи с удержанием ссылки. Возвращает Task."""
+    task = asyncio.create_task(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return task
 
 
 async def edit_or_resend(message: types.Message, text: str, reply_markup=None):

@@ -71,3 +71,38 @@ async def set_last_cb(user_id: int, payload: str):
 async def get_last_cb(user_id: int):
     doc = await state_col.find_one({'_id': user_id}, {'last_cb': 1})
     return (doc or {}).get('last_cb')
+
+
+# ------------------------- история поисковых запросов -------------------------
+
+RECENT_QUERIES_MAX = 5
+
+
+def clean_query(query) -> str:
+    """Нормализация запроса для хранения (обезвреживает разделители payload-ов)."""
+    return str(query or '').strip().replace('|', ' ').replace(':', ' ')[:50]
+
+
+async def add_query(user_id: int, query: str) -> list:
+    """Сохраняет запрос в конец списка недавних (дубликат убирается)."""
+    query = clean_query(query)
+    if not query:
+        return await get_queries(user_id)
+    # $pull и $push по одному полю нельзя выполнять одним update (conflict),
+    # поэтому два прохода — это происходит один раз на поиск.
+    await state_col.update_one({'_id': user_id}, {'$pull': {'recent_queries': query}},
+                               upsert=True)
+    await state_col.update_one(
+        {'_id': user_id},
+        {'$push': {'recent_queries': {'$each': [query], '$slice': -RECENT_QUERIES_MAX}}},
+        upsert=True)
+    return await get_queries(user_id)
+
+
+async def get_queries(user_id: int) -> list:
+    doc = await state_col.find_one({'_id': user_id}, {'recent_queries': 1})
+    return list((doc or {}).get('recent_queries') or [])
+
+
+async def clear_queries(user_id: int):
+    await state_col.update_one({'_id': user_id}, {'$pull': {'recent_queries': None}})

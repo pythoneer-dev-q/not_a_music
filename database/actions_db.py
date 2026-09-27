@@ -11,6 +11,57 @@ likes_col = database['m_likes']
 dislikes_col = database['m_dislikes']
 saved_col = database['m_saved']
 views_col = database['m_views']
+history_col = database['m_history']          # {_id: "{uid}:{tid}", user_id, track_id, at, count}
+
+HISTORY_TTL_SECONDS = 30 * 24 * 3600         # история хранится 30 дней
+_history_indexes_ready = False
+
+
+async def _ensure_history_indexes():
+    global _history_indexes_ready
+    if _history_indexes_ready:
+        return
+    await history_col.create_index('at', expireAfterSeconds=HISTORY_TTL_SECONDS)
+    await history_col.create_index([('user_id', 1), ('at', -1)])
+    _history_indexes_ready = True
+
+
+# ------------------------- история прослушиваний -------------------------
+
+async def add_history(user_id: int, track_id):
+    """Записывает прослушивание в историю (повторное — продлевает срок)."""
+    await _ensure_history_indexes()
+    user_id, track_id = int(user_id), str(track_id)
+    await history_col.update_one(
+        {'_id': f"{user_id}:{track_id}"},
+        {'$set': {'user_id': user_id, 'track_id': track_id,
+                  'at': datetime.datetime.now(datetime.timezone.utc)},
+         '$inc': {'count': 1}},
+        upsert=True,
+    )
+
+
+async def history_count(user_id: int) -> int:
+    await _ensure_history_indexes()
+    return await history_col.count_documents({'user_id': int(user_id)}) or 0
+
+
+async def get_history(user_id: int, skip: int = 0, limit: int = 7) -> list:
+    await _ensure_history_indexes()
+    cursor = (history_col.find({'user_id': int(user_id)})
+              .sort('at', -1).skip(max(0, skip)).limit(limit))
+    return await cursor.to_list(length=limit)
+
+
+async def delete_history_item(user_id: int, track_id: str):
+    await _ensure_history_indexes()
+    await history_col.delete_one({'_id': f"{int(user_id)}:{str(track_id)}"})
+
+
+async def clear_history(user_id: int) -> int:
+    await _ensure_history_indexes()
+    result = await history_col.delete_many({'user_id': int(user_id)})
+    return result.deleted_count or 0
 
 
 # ------------------------- просмотры -------------------------
@@ -83,6 +134,14 @@ async def toggle_dislike(user_id: int, track_id: str) -> bool:
     await dislikes_col.insert_one({'user_id': user_id, 'track_id': track_id})
     await music_db.update_track_dislikes(track_id, 1)
     return True
+
+
+async def count_user_likes(user_id: int) -> int:
+    return await likes_col.count_documents({'user_id': int(user_id)}) or 0
+
+
+async def count_user_dislikes(user_id: int) -> int:
+    return await dislikes_col.count_documents({'user_id': int(user_id)}) or 0
 
 
 # ------------------------- избранное (макс. FAV_MAX, пагинация) -------------------------

@@ -10,12 +10,40 @@ from aiogram.types import (
 )
 
 from core.app_logic import downloader, TelegramProgressReporter, track_display_name
-from database import music_db
-from utils import kbs, messages
+from database import actions_db, bot_db, music_db
+from utils import kbs, messages, utils
 from utils.i18n import t
 from utils.kbs import DEFAULT_COVER
 
 xrouter = Router()
+
+
+@xrouter.inline_query(F.query.startswith("track_"))
+async def inline_track_handler(inline_query: InlineQuery):
+    """Шаринг конкретного трека (кнопка «Поделиться» под треком)."""
+    track_id = inline_query.query.replace("track_", "", 1).strip()
+    docs = await music_db.get_requests_by_ids([track_id])
+    doc = docs.get(track_id) or {}
+    if not doc:
+        return await inline_query.answer([], cache_time=5, is_personal=True)
+
+    artist = str(doc.get('artist') or doc.get('title') or 'Unknown')
+    title = str(doc.get('title') or doc.get('name') or 'Unknown')
+    label = f"{artist} — {title}"
+    cover = doc.get('cover') or DEFAULT_COVER
+
+    results = [InlineQueryResultArticle(
+        id=md5(f"tr_{track_id}".encode()).hexdigest(),
+        title=f"🎵 {label}"[:60],
+        description=t('btn_dl'),
+        thumbnail_url=cover,
+        input_message_content=InputTextMessageContent(
+            message_text=t('share_tr_text', title=escape(label)),
+            parse_mode="HTML",
+        ),
+        reply_markup=await kbs.back_to(f'in_dl_{track_id}', t('btn_dl')),
+    )]
+    await inline_query.answer(results, cache_time=10, is_personal=True)
 
 
 @xrouter.inline_query(F.query.startswith("playlist_"))
@@ -65,7 +93,7 @@ async def searcher_inline(inline_query: InlineQuery):
 
     for term in sc_items:
         track_id = str(term.get('fileId') or term.get('id') or '')
-        asyncio.create_task(music_db.register_request(
+        utils.spawn(music_db.register_request(
             title=term.get('title'),
             name=term.get('artist'),
             cover=(term.get('imageInfo') or {}).get('imageUrl', DEFAULT_COVER),
@@ -126,6 +154,10 @@ async def play_track_inline(call: CallbackQuery):
 
     t_id = call.data[len('in_dl_'):]
     imid = call.inline_message_id
+
+    # статистика и история: инлайн-режим идёт мимо _deliver_track
+    utils.spawn(bot_db.incr_played(call.from_user.id))
+    utils.spawn(actions_db.add_history(call.from_user.id, t_id))
 
     try:
         data = await music_db.search_track_musicDb(t_id)

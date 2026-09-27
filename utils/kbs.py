@@ -47,13 +47,13 @@ async def grt_kb():
 async def greet_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t('btn_next'), callback_data='reg_reg')],
-        [InlineKeyboardButton(text=t('btn_rules'), url='https://ya.ru/')],
+        [InlineKeyboardButton(text=t('btn_rules'), callback_data='reg_rules')],
     ])
 
 
 async def greet_kb_2():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t('btn_policy'), url='https://ya.ru/')],
+        [InlineKeyboardButton(text=t('btn_policy'), callback_data='reg_policy')],
         [InlineKeyboardButton(text=t('btn_done'), callback_data='reg_reg_2')],
     ])
 
@@ -82,7 +82,15 @@ async def main_menu(from_user: int) -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton(text=t('btn_search'), callback_data='user_search', style='success')],
         [InlineKeyboardButton(text=t('btn_playlists', n=pl_count), callback_data='user_pllists', style='primary')],
-        [InlineKeyboardButton(text=t('btn_profile'), callback_data='prof')],
+        [
+            InlineKeyboardButton(text=t('btn_hist'), callback_data='hist:1'),
+            InlineKeyboardButton(text=t('btn_random'), callback_data='user_random'),
+        ],
+        [InlineKeyboardButton(text=t('btn_top_pls'), callback_data='user_toppls')],
+        [
+            InlineKeyboardButton(text=t('btn_profile'), callback_data='prof'),
+            InlineKeyboardButton(text=t('btn_help'), callback_data='user_help'),
+        ],
     ])
 
 
@@ -91,29 +99,38 @@ async def main_menu(from_user: int) -> InlineKeyboardMarkup:
 async def get_search_kb(items: list, query: str, page: int, pages_all: int, origin: str):
     builder = InlineKeyboardBuilder()
 
-    # батч: все payload-ы (треки + пагинация) одной вставкой
+    # батч: все payload-ы одной вставкой (игра / избранное / в плейлист / пагинация)
     play_payloads = [f"dl|{origin}|{track.get('fileId') or track.get('id')}" for track in items]
+    fav_payloads = [f"fsvq|{track.get('fileId') or track.get('id')}|{origin}" for track in items]
+    pl_payloads = [f"plq|{track.get('fileId') or track.get('id')}|{origin}" for track in items]
+
     nav_payloads = []
     if page > 1:
         nav_payloads.append(f"srp|{query}|{page - 1}")
     if page < pages_all:
         nav_payloads.append(f"srp|{query}|{page + 1}")
-    ids = await _pack_many(play_payloads + nav_payloads)
-    nav_ids = ids[len(play_payloads):]
 
-    for track, cb in zip(items, ids):
+    total = len(play_payloads)
+    ids = await _pack_many(play_payloads + fav_payloads + pl_payloads + nav_payloads)
+    fav_ids = ids[total:2 * total]
+    pl_ids = ids[2 * total:3 * total]
+    nav_ids = ids[3 * total:]
+
+    for i, track in enumerate(items):
         artist   = track.get('artist') or track.get('title') or 'Unknown'
         title    = track.get('title') or track.get('name') or 'Unknown'
         duration = int(track.get('duration') or 0)
         dur_str  = f"{duration // 60}:{duration % 60:02d}" if duration else "--:--"
         if track.get('is_downloaded'):
             text = f"✅ {artist} — {title} [{dur_str}]"
-            builder.button(text=text, callback_data=cb, style='success')
+            builder.button(text=text, callback_data=ids[i], style='success')
         else:
             text = f"🎵 {artist} — {title} [{dur_str}]"
-            builder.button(text=text, callback_data=cb)
+            builder.button(text=text, callback_data=ids[i])
+        builder.button(text=t('btn_add_fav_short'), callback_data=fav_ids[i])
+        builder.button(text=t('btn_add_pl_short'), callback_data=pl_ids[i])
 
-    builder.adjust(*([1] * len(items)))
+    builder.adjust(*([3] * len(items)))
 
     nav = []
     idx = 0
@@ -180,6 +197,9 @@ async def track_kb(t_id: str, user_id: int, back_cb: str = 'user_menu', next_pay
         builder.row(InlineKeyboardButton(
             text=t('btn_next_track'),
             callback_data=next_cb))
+    builder.row(InlineKeyboardButton(
+        text=t('btn_share_tr'),
+        switch_inline_query=f'track_{t_id}'))
     builder.row(InlineKeyboardButton(text=t('btn_back'), callback_data=back_cb))
     return builder.as_markup()
 
@@ -246,11 +266,27 @@ async def show_playlists(pllists: list):
     return builder.as_markup()
 
 
-async def pl_add_kb(pllists: list, track_id: str, back_to: str = 'user_menu'):
+def origin_back_cb(origin: str) -> str:
+    """callback «Назад» для origin-а выдачи: sq:{q}:{page} | top | hist:{page}."""
+    if origin.startswith('sq:'):
+        _, query, page = origin.split(':', 2)
+        return f'srp|{query}|{page}'
+    if origin == 'top':
+        return 'user_topTracks'
+    if origin.startswith('hist:'):
+        return origin
+    if origin.startswith('fav:'):
+        return f'favs:{origin.split(":", 1)[1]}'
+    return 'user_menu'
+
+
+async def pl_add_kb(pllists: list, track_id: str, back_to: str = 'user_menu',
+                    origin: str = None):
     builder = InlineKeyboardBuilder()
     pllists = pllists or []
-    # батч: один payload на плейлист
-    ids = await _pack_many([f'pl_up|{pl.get("_id")}|{track_id}' for pl in pllists])
+    # батч: один payload на плейлист; origin позволяет вернуться в ту же выдачу
+    suffix = f'|{origin}' if origin else ''
+    ids = await _pack_many([f'pl_up|{pl.get("_id")}|{track_id}{suffix}' for pl in pllists])
     for pl, cb in zip(pllists, ids):
         builder.row(InlineKeyboardButton(
             text=f'➕ {pl.get("pl_name")}',
@@ -338,6 +374,7 @@ async def profile_kb(user_data: dict):
             text=t('btn_visibility_off') if hidden else t('btn_visibility_on'),
             callback_data='prof_vis')],
         [InlineKeyboardButton(text=t('btn_about'), callback_data='prof_about')],
+        [InlineKeyboardButton(text=t('btn_lang', lang=lang.upper()), callback_data='langsw')],
         [InlineKeyboardButton(text=t('btn_to_menu'), callback_data='user_menu')],
     ])
 
@@ -384,4 +421,86 @@ async def inline_pllist(pl_data: dict, bot_username: str):
         text=t('btn_listen_bot'),
         url=f'https://t.me/{bot_username}?start=pl_{pl_data.get("_id")}',
     ))
+    return builder.as_markup()
+
+# ------------------------- история прослушиваний -------------------------
+
+async def hist_kb(page: int, pages_all: int, docs: list, labels: dict):
+    """Страница истории: ▶️ сыграть / ❌ убрать из истории."""
+    payloads = []
+    for doc in docs:
+        t_id = str(doc.get('track_id'))
+        payloads.append(f"dl|hist:{page}|{t_id}")
+        payloads.append(f"hist_rm|{t_id}|{page}")
+    ids = await _pack_many(payloads)
+
+    builder = InlineKeyboardBuilder()
+    for i, doc in enumerate(docs):
+        t_id = str(doc.get('track_id'))
+        label = labels.get(t_id) or doc.get('track_id') or '?'
+        builder.row(
+            InlineKeyboardButton(
+                text=f"▶️ {str(label)[:40]}",
+                callback_data=ids[2 * i], style='primary'),
+            InlineKeyboardButton(
+                text='❌',
+                callback_data=ids[2 * i + 1], style='danger'),
+        )
+    builder.row(*_nav_row(
+        page, pages_all,
+        prev_cb=f'hist:{max(page - 1, 1)}',
+        next_cb=f'hist:{min(page + 1, pages_all)}',
+    ))
+    builder.row(InlineKeyboardButton(text=t('btn_clear_hist'), callback_data='hist_clr'))
+    builder.row(InlineKeyboardButton(text=t('btn_to_menu'), callback_data='user_menu'))
+    return builder.as_markup()
+
+
+# ------------------------- помощь / правила -------------------------
+
+async def help_kb(back_cb: str = 'user_menu'):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t('btn_rules'), callback_data='user_rules')],
+        [InlineKeyboardButton(text=t('btn_policy'), callback_data='user_policy')],
+        [InlineKeyboardButton(text=t('btn_to_menu'), callback_data=back_cb)],
+    ])
+
+
+async def text_page_kb(back_cb: str, back_text: str = None):
+    """Кнопка «Назад» для текстовых страниц (правила/политика/помощь)."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=back_text or t('btn_back'), callback_data=back_cb)
+    ]])
+
+
+# ------------------------- быстрые запросы -------------------------
+
+async def search_start_kb(user_id: int):
+    """Экран «Поиск»: недавние запросы + кнопка в меню."""
+    queries = await nav_db.get_queries(user_id)
+    builder = InlineKeyboardBuilder()
+    if queries:
+        ids = await _pack_many([f'srp|{q}|1' for q in queries])
+        for q, cb in zip(queries, ids):
+            builder.row(InlineKeyboardButton(text=f"🔁 {str(q)[:35]}", callback_data=cb))
+    builder.row(InlineKeyboardButton(text=t('btn_to_menu'), callback_data='user_menu'))
+    return builder.as_markup()
+
+
+# ------------------------- топ плейлистов -------------------------
+
+async def top_pls_kb(page: int, pages_all: int, items: list):
+    builder = InlineKeyboardBuilder()
+    for it in items:
+        label = f'🎵 {it.get("pl_name")} · 👁 {it.get("views", 0)} · ❤️ {it.get("likes", 0)}'
+        builder.row(InlineKeyboardButton(
+            text=str(label)[:48],
+            callback_data=f'plv:{it.get("_id")}:1',
+        ))
+    builder.row(*_nav_row(
+        page, pages_all,
+        prev_cb=f'tpls:{max(page - 1, 1)}',
+        next_cb=f'tpls:{min(page + 1, pages_all)}',
+    ))
+    builder.row(InlineKeyboardButton(text=t('btn_to_menu'), callback_data='user_menu'))
     return builder.as_markup()

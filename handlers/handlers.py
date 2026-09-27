@@ -131,6 +131,9 @@ async def render_search(call: CallbackQuery, query: str, page: int):
         search_data = await sc_task
         origin = f"sq:{_safe_q(query)}:{page}"
         title = t('results_for', query=escape(query))
+        if page == 1:
+            # запоминаем запрос для кнопок «Недавние» на экране поиска
+            utils.spawn(nav_db.add_query(call.from_user.id, query))
 
     if not search_data or not isinstance(search_data, dict):
         return await call.answer(t('no_results'), show_alert=True)
@@ -142,7 +145,7 @@ async def render_search(call: CallbackQuery, query: str, page: int):
     for term in sc_items:
         track_id = str(term.get('fileId') or term.get('id') or '')
         img = (term.get('imageInfo') or {}).get('imageUrl')
-        asyncio.create_task(music_db.register_request(
+        utils.spawn(music_db.register_request(
             title=term.get('title'),
             name=term.get('artist'),
             cover=img or kbs.DEFAULT_COVER,
@@ -200,6 +203,9 @@ async def search_items(message: Message):
 
     status_message = await message.answer(await messages.search_progress(query))
 
+    # запоминаем запрос для кнопок «Недавние» на экране поиска
+    utils.spawn(nav_db.add_query(message.from_user.id, query))
+
     cached_task = asyncio.create_task(music_db.search_downloaded_tracks(query, limit=3))
     sc_task = asyncio.create_task(downloader.search_track(query))
     cached_tracks = await cached_task
@@ -215,7 +221,7 @@ async def search_items(message: Message):
     for term in sc_items:
         track_id = str(term.get('fileId') or term.get('id') or '')
         img = (term.get('imageInfo') or {}).get('imageUrl')
-        asyncio.create_task(music_db.register_request(
+        utils.spawn(music_db.register_request(
             title=term.get('title'),
             name=term.get('artist'),
             cover=img or kbs.DEFAULT_COVER,

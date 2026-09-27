@@ -23,6 +23,8 @@ def _back_kb(origin: str) -> str:
         return f'plv:{pl_id}:{page}'
     if origin.startswith('fav:'):
         return origin  # {page}
+    if origin.startswith('hist:'):
+        return origin  # hist:{page}
     if origin == 'top':
         return 'user_topTracks'
     return 'user_menu'
@@ -89,19 +91,17 @@ async def play_track(call: CallbackQuery, data: str = None):
 
 
 async def _maybe_show_ad(call: CallbackQuery) -> bool:
+    """Считает прослушивание и показывает рекламу каждые N треков.
+
+    Счётчик увеличивается ВСЕГДА — иначе при AD_EVERY_N=0 статистика профиля
+    «Прослушано треков» навсегда оставалась бы нулём.
+    """
+    played = await bot_db.incr_played(call.from_user.id)
     ad_every = int(await settings_db.get('AD_EVERY_N'))
-    if ad_every <= 0:
+    if ad_every <= 0 or played % ad_every != 0:
         return False
 
-    # параллелим incr_played и get_ads_random — они независимы
-    played_task = asyncio.create_task(bot_db.incr_played(call.from_user.id))
-    ad_task = asyncio.create_task(bot_db.get_ads_random())
-
-    played = await played_task
-    if played % ad_every != 0:
-        return False
-
-    ad = await ad_task
+    ad = await bot_db.get_ads_random()
     if not ad:
         return False
 
@@ -136,7 +136,8 @@ async def _deliver_track(call: CallbackQuery, t_id: str, origin: str, next_paylo
 
     t_id = str(t_id)
     back_cb = _back_kb(origin)
-    asyncio.create_task(actions_db.register_view(t_id))
+    utils.spawn(actions_db.register_view(t_id))
+    utils.spawn(actions_db.add_history(call.from_user.id, t_id))
 
     # кэш-хит: file_id уже есть — мгновенная отдача
     data = await music_db.search_track_musicDb(t_id)
@@ -348,6 +349,151 @@ async def favs_page(call: CallbackQuery, data: str = None):
 
 
 
+# ------------------------- история прослушиваний -------------------------
+
+async def _render_history(call: CallbackQuery, page: int = 1):
+    user_id = call.from_user.id
+    page_size = int(await settings_db.get('FAV_PAGE_SIZE'))
+    total = await actions_db.history_count(user_id)
+
+    if total == 0:
+        await utils.edit_or_resend(
+            call.message, t('hist_empty'),
+            reply_markup=await kbs.back_to('user_menu', t('btn_to_menu')))
+        await nav_db.set_last_cb(user_id, 'user_menu')
+        return
+
+    pages_all = max(1, -(-total // page_size))
+    page = min(max(1, page), pages_all)
+    docs = await actions_db.get_history(user_id, skip=(page - 1) * page_size, limit=page_size)
+
+    # подписи к трекам достаём одним запросом
+    metas = await music_db.get_requests_by_ids([d.get('track_id') for d in docs])
+    labels = {}
+    for doc in docs:
+        t_id = str(doc.get('track_id'))
+        meta = metas.get(t_id) or {}
+        labels[t_id] = (meta.get('query_str')
+                        or f"{meta.get('artist') or '?'} - {meta.get('title') or '?'}")
+
+    await utils.edit_or_resend(
+        call.message,
+        t('hist_title', p=page, all=pages_all, n=total),
+        reply_markup=await kbs.hist_kb(page, pages_all, docs, labels),
+    )
+    await nav_db.set_last_cb(user_id, f'hist:{page}')
+
+
+@zrouter.callback_query(F.data.startswith('hist:'))
+@routes.route('hist:')
+async def history_page(call: CallbackQuery, data: str = None):
+    if await utils.checkAccount(call, call.from_user.id) != 'OK':
+        return
+    data = data or call.data
+    await call.answer()
+    await _render_history(call, int(data.split(':')[1]))
+
+
+@zrouter.callback_query(F.data.startswith('hist_rm|'))
+@routes.route('hist_rm|')
+async def history_remove(call: CallbackQuery, data: str = None):
+    if await utils.checkAccount(call, call.from_user.id) != 'OK':
+        return
+    data = data or call.data
+    _, t_id, page = data.split('|')
+    await actions_db.delete_history_item(call.from_user.id, t_id)
+    await call.answer(t('fav_removed'))
+    await _render_history(call, int(page))
+
+
+@zrouter.callback_query(F.data == 'hist_clr')
+async def history_clear(call: CallbackQuery):
+    if await utils.checkAccount(call, call.from_user.id) != 'OK':
+        return
+    await actions_db.clear_history(call.from_user.id)
+    await call.answer(t('hist_cleared'), show_alert=True)
+    await _render_history(call, 1)
+
+
+# ------------------------- действия прямо из выдачи списка -------------------------
+
+async def _rerender_origin(call: CallbackQuery, origin: str):
+    """Возвращает пользователя на ту же страницу после действия."""
+    if origin.startswith('sq:'):
+        _, query, page = origin.split(':', 2)
+        return await render_search(call, query, int(page))
+    if origin == 'top':
+        return await render_search(call, 'top', 1)
+    if origin.startswith('hist:'):
+        return await _render_history(call, int(origin.split(':', 1)[1]))
+    if origin.startswith('fav:'):
+        return await _render_favs(call, int(origin.split(':', 1)[1]))
+    await call.answer()
+
+
+@zrouter.callback_query(F.data.startswith('fsvq|'))
+@routes.route('fsvq|')
+async def save_track_from_list(call: CallbackQuery, data: str = None):
+    """⭐️ В избранное/убрать — прямо из списка результатов (без открытия трека)."""
+    if await utils.checkAccount(call, call.from_user.id) != 'OK':
+        return
+    data = data or call.data
+    _, t_id, origin = data.split('|', 2)
+    result = await actions_db.toggle_saved(call.from_user.id, t_id)
+    if result == 'full':
+        fav_max = int(await settings_db.get('USER_SAVED_LIMIT'))
+        await call.answer(t('fav_full', max=fav_max), show_alert=True)
+        return
+    await call.answer(t('fav_added' if result == 'added' else 'fav_removed'))
+    await _rerender_origin(call, origin)
+
+
+@zrouter.callback_query(F.data.startswith('plq|'))
+@routes.route('plq|')
+async def choose_playlist_from_list(call: CallbackQuery, data: str = None):
+    """➕ В плейлист — прямо из списка результатов."""
+    if await utils.checkAccount(call, call.from_user.id) != 'OK':
+        return
+    data = data or call.data
+    _, t_id, origin = data.split('|', 2)
+    await call.answer()
+    pls = await music_db.search_playlistById(call.from_user.id)
+    if not pls:
+        return await utils.edit_or_resend(
+            call.message, t('pl_list_empty'),
+            reply_markup=await kbs.text_page_kb(kbs.origin_back_cb(origin), t('btn_back')))
+    await utils.edit_or_resend(
+        call.message, t('pl_choose'),
+        reply_markup=await kbs.pl_add_kb(
+            pls, t_id, back_to=kbs.origin_back_cb(origin), origin=origin))
+
+
+# ------------------------- топ плейлистов -------------------------
+
+async def _render_top_pls(call: CallbackQuery, page: int = 1):
+    data = await music_db.top_playlists(page=page, limit=7)
+    items = data.get('items') or []
+    if not items:
+        return await utils.edit_or_resend(
+            call.message, t('pl_top_empty'),
+            reply_markup=await kbs.back_to('user_menu', t('btn_to_menu')))
+    pages_all = (data.get('paginationInfo') or {}).get('lastPage', 1)
+    await utils.edit_or_resend(
+        call.message,
+        t('pl_top_title', p=min(page, pages_all), all=pages_all),
+        reply_markup=await kbs.top_pls_kb(page, pages_all, items))
+
+
+@zrouter.callback_query(F.data.startswith('tpls:'))
+@routes.route('tpls:')
+async def top_playlists_page(call: CallbackQuery, data: str = None):
+    if await utils.checkAccount(call, call.from_user.id) != 'OK':
+        return
+    data = data or call.data
+    await call.answer()
+    await _render_top_pls(call, int(data.split(':')[1]))
+
+
 @zrouter.callback_query(F.data == 'prof')
 async def my_profile(call: CallbackQuery, state: FSMContext):
     if await utils.checkAccount(call, call.from_user.id) != 'OK':
@@ -415,6 +561,16 @@ async def user_matcher(call: CallbackQuery):
             await call.message.edit_text(t('sub_prompt'), reply_markup=await kbs.sub_channels())
         case 'reg_3':
             await call.message.answer(t('welcome_menu'))
+        case 'rules':
+            await utils.edit_or_resend(
+                call.message,
+                f"{t('rules_title')}\n\n{t('rules_text')}",
+                reply_markup=await kbs.text_page_kb('reg_rg', t('btn_back')))
+        case 'policy':
+            await utils.edit_or_resend(
+                call.message,
+                f"{t('policy_title')}\n\n{t('policy_text')}",
+                reply_markup=await kbs.text_page_kb('reg_reg', t('btn_back')))
     await call.answer()
 
 
@@ -445,7 +601,34 @@ async def user_section(call: CallbackQuery, data: str = None, state: FSMContext 
     elif section == 'search':
         await utils.edit_or_resend(
             call.message, text=await messages.search_message(),
-            reply_markup=await kbs.back_to('user_menu', t('btn_to_menu')))
+            reply_markup=await kbs.search_start_kb(call.from_user.id))
+    elif section == 'help':
+        await utils.edit_or_resend(
+            call.message,
+            f"{t('help_title')}\n\n{t('help_text')}",
+            reply_markup=await kbs.help_kb())
+        await nav_db.set_last_cb(call.from_user.id, 'user_help')
+    elif section == 'rules':
+        await utils.edit_or_resend(
+            call.message,
+            f"{t('rules_title')}\n\n{t('rules_text')}",
+            reply_markup=await kbs.text_page_kb('user_help', t('btn_back')))
+    elif section == 'policy':
+        await utils.edit_or_resend(
+            call.message,
+            f"{t('policy_title')}\n\n{t('policy_text')}",
+            reply_markup=await kbs.text_page_kb('user_help', t('btn_back')))
+    elif section == 'random':
+        item = await music_db.random_track()
+        if not item:
+            await utils.edit_or_resend(
+                call.message, t('random_empty'),
+                reply_markup=await kbs.back_to('user_menu', t('btn_to_menu')))
+        else:
+            await _deliver_track(call, item['id'], 'user_menu')
+    elif section == 'toppls':
+        await _render_top_pls(call, 1)
+        await nav_db.set_last_cb(call.from_user.id, 'user_toppls')
     elif section == 'topTracks':
         await render_search(call, 'top', 1)
         await nav_db.set_last_cb(call.from_user.id, 'user_topTracks')
@@ -521,18 +704,25 @@ async def choose_playlist_for_track(call: CallbackQuery, data: str = None):
 @routes.route('pl_up|')
 async def add_track_to_playlist(call: CallbackQuery, data: str = None):
     data = data or call.data
-    _, pl_id, t_id = data.split('|')
+    parts = data.split('|')
+    pl_id, t_id = parts[1], parts[2]
+    origin = parts[3] if len(parts) > 3 else None
     title = await music_db.get_request_by_id(t_id)
     result = await music_db.add_tracks_playlist(pl_id, title, t_id)
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
     if result:
         await call.answer(t('pl_track_added'), show_alert=True)
     else:
         tracks_max = int(await settings_db.get('TRACKS_MAX'))
         await call.answer(t('pl_track_full', max=tracks_max), show_alert=True)
+
+    if origin:
+        # добавление из списка — возвращаем пользователя на ту же страницу
+        await _rerender_origin(call, origin)
+        return
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
 
 
 @zrouter.callback_query(F.data.startswith('pl_del|'))

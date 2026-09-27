@@ -228,3 +228,70 @@ async def get_top_tracks(page: int = 1, limit: int = 7) -> dict:
     total = await database['m_views'].count_documents({'count': {'$gt': 0}})
     pages_all = max(1, -(-total // limit))
     return {'items': items, 'paginationInfo': {'lastPage': pages_all}}
+
+
+async def get_requests_by_ids(track_ids) -> dict:
+    """Батч-загрузка метаданных треков: {_id: doc}. Один запрос вместо N."""
+    ids = [str(i) for i in track_ids if i]
+    if not ids:
+        return {}
+    out: dict = {}
+    for col in (music_col, search_col):
+        missing = [i for i in ids if i not in out]
+        if not missing:
+            break
+        async for doc in col.find({'_id': {'$in': missing}}):
+            out.setdefault(str(doc.get('_id')), doc)
+    return out
+
+
+def item_from_doc(doc: dict) -> dict:
+    """Нормализует документ БД к виду элемента выдачи поиска."""
+    doc = doc or {}
+    t_id = str(doc.get('_id'))
+    artist = doc.get('artist') or doc.get('title') or 'SoundCloud'
+    title = doc.get('title') or doc.get('name') or f'Track {t_id}'
+    return {
+        'id': t_id,
+        'fileId': t_id,
+        'title': title,
+        'artist': artist,
+        'duration': int(doc.get('duration') or 0),
+        'imageInfo': {'imageUrl': doc.get('cover') or ''},
+        'url': doc.get('url') or '',
+        'query_str': doc.get('query_str') or f"{artist} - {title}",
+        'is_downloaded': bool(doc.get('file')),
+        'file': doc.get('file'),
+    }
+
+
+async def random_track() -> dict:
+    """Случайный трек: сначала из скачанных, иначе из любой поисковой записи."""
+    async for doc in music_col.aggregate([
+            {'$match': {'file': {'$exists': True, '$ne': None}}},
+            {'$sample': {'size': 1}}]):
+        return item_from_doc(doc)
+    async for doc in search_col.aggregate([{'$sample': {'size': 1}}]):
+        return item_from_doc(doc)
+    return {}
+
+
+async def top_playlists(page: int = 1, limit: int = 7) -> dict:
+    """Публичные плейлисты, отсортированные по количеству просмотров."""
+    query = {'is_public': True, 'views': {'$gt': 0}}
+    total = await playlist_col.count_documents(query)
+    skip = max(0, (page - 1) * limit)
+    docs = await (playlist_col.find(query).sort('views', -1)
+                  .skip(skip).limit(limit)).to_list(length=limit)
+
+    items = [{
+        '_id': d.get('_id'),
+        'pl_name': d.get('pl_name') or '—',
+        'founder_id': d.get('founder_id'),
+        'views': int(d.get('views') or 0),
+        'likes': len(d.get('liked_by') or []),
+        'tracks': len(d.get('tracks') or []),
+    } for d in docs]
+
+    pages_all = max(1, -(-total // limit)) if total else 1
+    return {'items': items, 'paginationInfo': {'lastPage': pages_all}}

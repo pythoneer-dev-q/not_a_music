@@ -14,7 +14,7 @@ _lang_cache: Dict[int, str] = {}
 
 TRANSLATIONS: Dict[str, Dict[str, str]] = {
     'ru': {
-        'greet': "🎉 Привет, <b>{name}</b>!\n🔮 Давай наслаждаться бесплатной и безлимитной музыкой?\n\n🧩 <b>PS:</b> Ты пришел от {source}",
+        'greet': "🎉 Привет, <b>{name}</b>!\n🔮 Давай наслаждаться бесплатной и безлимитной музыкой!\n\n🧩 <b>PS:</b> Ты пришел от {source}",
         'main_menu': "<b>💡 Главное меню:</b>\n\n<i>💬 Чтобы поискать трек — нажмите «Поиск»</i>",
         'welcome_menu': "✅ Добро пожаловать в меню!",
         'rules_read': "❓ Внимательно ознакомьтесь с правилами платформы",
@@ -33,7 +33,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         'page_of': "📑 {p} / {all}",
 
         'uploading': "⏳ Загрузка трека в облако...",
-        'track_not_found': "❌ Трек не найден в источнике",
         'already_open': "ℹ️ Трек уже открыт",
         'liked': "👍 Лайк!",
         'unliked': "👍 Лайк убран",
@@ -62,7 +61,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         'pl_share_text': "🎧 <b>Послушайте мой плейлист: {name}</b>\n\nВсего треков: {n}",
         'pl_tracks_count': "В плейлисте {n} треков",
 
-        'ad_msg': "📢 <b>Реклама:</b> \n\n<i>{text}</i>",
+        'ad_msg': "📢 <b>Реклама:</b> \n\n<i>{text}</i>\n<i>(показывается каждые {n} треков)</i>",
 
         # --- профиль ---
         'about_prompt': "✏️ <b>Отправьте текст «О себе»</b>\n\n<i>Максимум 300 символов. Он будет виден в вашем профиле.</i>",
@@ -80,6 +79,57 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         'cb_expired': "⌛️ Ссылка устарела — откройте раздел заново",
         'top_chart': "🏆 Топ-чарт: <b>TOP 1000</b>",
         'user_not_found': "❌ Пользователь не найден",
+
+        # --- помощь / правила / статистика ---
+        'btn_help': "ℹ️ Помощь",
+        'help_title': "ℹ️ <b>Как пользоваться ботом</b>",
+        'help_text': ("🔎 <b>Поиск</b> — просто напишите название трека или исполнителя.\n"
+                      "⚡️ <b>ТОП</b> — самые прослушиваемые треки.\n"
+                      "⭐️ <b>Избранное</b> — кнопкой ⭐️ под любым списком треков.\n"
+                      "🎵 <b>Плейлисты</b> — собирайте свои подборки.\n"
+                      "🕘 <b>История</b> — что вы слушали раньше.\n"
+                      "🎲 <b>Случайный трек</b> — когда не знаете, что послушать.\n"
+                      "✈️ <b>Поделиться</b> — отправляйте треки в другие чаты кнопкой под треком."),
+        'rules_title': "🛡 <b>Правила использования</b>",
+        'rules_text': ("1️⃣ Бот нужен для личного прослушивания музыки.\n"
+                       "2️⃣ Запрещено использовать бот для рассылок и спама.\n"
+                       "3️⃣ Запрещен оскорбительный контент в названиях плейлистов.\n"
+                       "4️⃣ За нарушения аккаунт может быть заблокирован.\n"
+                       "5️⃣ Данные хранятся только для работы бота."),
+        'policy_title': "❗️ <b>Политика конфиденциальности</b>",
+        'policy_text': ("Бот хранит только необходимое для работы:\n"
+                        "• ваш Telegram ID, имя и источник перехода;\n"
+                        "• язык и описание профиля (если заполнили);\n"
+                        "• плейлисты, избранное и историю прослушиваний.\n\n"
+                        "Данные не передаются третьим лицам. Удалить их можно по запросу администратору."),
+
+        # --- статистика профиля ---
+        'stats_title': "📊 <b>Моя статистика</b>",
+        'st_played': "▶️ Прослушано треков: <b>{n}</b>",
+        'st_likes': "👍 Лайков: <b>{n}</b>",
+        'st_dislikes': "👎 Дизлайков: <b>{n}</b>",
+        'st_favs': "⭐️ В избранном: <b>{n}</b>",
+        'st_pls': "🎵 Плейлистов: <b>{n}</b>",
+
+        # --- история ---
+        'btn_hist': "🕘 История",
+        'hist_title': "🕘 <b>История прослушиваний</b>\nСтраница {p} / {all} · всего {n}",
+        'hist_empty': "🕘 История пуста.\n\n<i>Сыграйте трек — он появится здесь.</i>",
+        'hist_cleared': "🧹 История очищена",
+        'btn_clear_hist': "🧹 Очистить историю",
+
+        # --- топ плейлистов / случайный трек ---
+        'btn_top_pls': "🏆 ТОП плейлистов",
+        'pl_top_title': "🏆 <b>Популярные плейлисты</b>\nСтраница {p} / {all}",
+        'pl_top_empty': "🏆 Пока нет публичных плейлистов с просмотрами.",
+        'btn_random': "🎲 Случайный трек",
+        'random_empty': "🎲 Сейчас нет скачанных треков. Попробуйте поиск.",
+
+        # --- шаринг трека ---
+        'btn_share_tr': "✈️ Поделиться",
+        'btn_add_fav_short': "⭐️",
+        'btn_add_pl_short': "➕",
+        'share_tr_text': "🎧 <b>Послушайте этот трек</b>\n\n{title}",
 
         # --- кнопки ---
         'btn_go': "🎉 Поехали!",
@@ -115,7 +165,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
     },
     'en': {
         # --- greeting / menu ---
-        'greet': "🎉 Hi, <b>{name}</b>!\n🔮 Let's enjoy free and unlimited music?\n\n🧩 <b>PS:</b> You came from {source}",
+        'greet': "🎉 Hi, <b>{name}</b>!\n🔮 Let's enjoy free and unlimited music!\n\n🧩 <b>PS:</b> You came from {source}",
         'main_menu': "<b>💡 Main menu:</b>\n\n<i>💬 To search for a track press «Search».\nPlaylist tracks are easy to listen to with ▶ and switch with ⏭.</i>",
         'welcome_menu': "✅ Welcome to the menu!",
         'rules_read': "❓ Please read the platform rules carefully",
@@ -136,7 +186,6 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
 
         # --- playback ---
         'uploading': "⏳ Uploading track to the cloud...",
-        'track_not_found': "❌ Track not found in the source",
         'already_open': "ℹ️ Track is already open",
         'liked': "👍 Liked!",
         'unliked': "👍 Like removed",
@@ -187,6 +236,57 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         'cb_expired': "⌛️ Link expired — please reopen the section",
         'top_chart': "🏆 Top chart: <b>TOP 1000</b>",
         'user_not_found': "❌ User not found",
+
+        # --- help / rules / stats ---
+        'btn_help': "ℹ️ Help",
+        'help_title': "ℹ️ <b>How to use the bot</b>",
+        'help_text': ("🔎 <b>Search</b> — just type a track or artist name.\n"
+                      "⚡️ <b>TOP</b> — the most listened tracks.\n"
+                      "⭐️ <b>Favorites</b> — tap ⭐️ under any track list.\n"
+                      "🎵 <b>Playlists</b> — build your own collections.\n"
+                      "🕘 <b>History</b> — what you listened to before.\n"
+                      "🎲 <b>Random track</b> — when you don't know what to play.\n"
+                      "✈️ <b>Share</b> — send tracks to other chats with the button under the track."),
+        'rules_title': "🛡 <b>Terms of use</b>",
+        'rules_text': ("1️⃣ The bot is for personal listening only.\n"
+                       "2️⃣ Mass messaging and spam are forbidden.\n"
+                       "3️⃣ Offensive content in playlist names is forbidden.\n"
+                       "4️⃣ Violations may lead to an account ban.\n"
+                       "5️⃣ Data is stored only to keep the bot working."),
+        'policy_title': "❗️ <b>Privacy policy</b>",
+        'policy_text': ("The bot stores only what it needs:\n"
+                        "• your Telegram ID, name and referral source;\n"
+                        "• interface language and your «about» text (if set);\n"
+                        "• playlists, favorites and listening history.\n\n"
+                        "We never share this data with third parties. You can request its deletion from the admin."),
+
+        # --- profile stats ---
+        'stats_title': "📊 <b>My stats</b>",
+        'st_played': "▶️ Tracks played: <b>{n}</b>",
+        'st_likes': "👍 Likes: <b>{n}</b>",
+        'st_dislikes': "👎 Dislikes: <b>{n}</b>",
+        'st_favs': "⭐️ In favorites: <b>{n}</b>",
+        'st_pls': "🎵 Playlists: <b>{n}</b>",
+
+        # --- history ---
+        'btn_hist': "🕘 History",
+        'hist_title': "🕘 <b>Listening history</b>\nPage {p} / {all} · total {n}",
+        'hist_empty': "🕘 History is empty.\n\n<i>Play a track and it will show up here.</i>",
+        'hist_cleared': "🧹 History cleared",
+        'btn_clear_hist': "🧹 Clear history",
+
+        # --- popular playlists / random track ---
+        'btn_top_pls': "🏆 Top playlists",
+        'pl_top_title': "🏆 <b>Popular playlists</b>\nPage {p} / {all}",
+        'pl_top_empty': "🏆 No public playlists with views yet.",
+        'btn_random': "🎲 Random track",
+        'random_empty': "🎲 No downloaded tracks right now. Try search.",
+
+        # --- track sharing ---
+        'btn_share_tr': "✈️ Share",
+        'btn_add_fav_short': "⭐️",
+        'btn_add_pl_short': "➕",
+        'share_tr_text': "🎧 <b>Listen to this track</b>\n\n{title}",
 
         # --- buttons ---
         'btn_go': "🎉 Let's go!",

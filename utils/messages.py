@@ -1,7 +1,28 @@
+import asyncio
+
 from aiogram import html
 from html import escape
 
+from database import actions_db, music_db
 from utils.i18n import t
+
+
+async def stats_block(user_id: int, played: int = 0) -> str:
+    """Блок «Моя статистика» в профиле (счётчики читаются параллельно)."""
+    likes, dislikes, favs, pls = await asyncio.gather(
+        actions_db.count_user_likes(user_id),
+        actions_db.count_user_dislikes(user_id),
+        actions_db.saved_count(user_id),
+        music_db.pl_count_user(user_id),
+    )
+    return (
+        f"\n\n{t('stats_title')}\n"
+        f"• {t('st_played', n=int(played or 0))}\n"
+        f"• {t('st_likes', n=likes)}\n"
+        f"• {t('st_dislikes', n=dislikes)}\n"
+        f"• {t('st_favs', n=favs)}\n"
+        f"• {t('st_pls', n=pls)}"
+    )
 
 
 async def main_greet_sub(user: str, source: str = None):
@@ -57,11 +78,12 @@ def _profile_block(user_data: dict) -> str:
 
 
 async def my_profile(user_data: dict, bot_username: str) -> str:
-    """Собственный профиль (с настройками)."""
+    """Собственный профиль (с настройками и статистикой)."""
     text = (
         f"👤 {html.bold(escape(str(user_data.get('user_name'))))}\n\n"
         f"<b>🌐 Информация по пользователю:</b>\n"
         + html.expandable_blockquote(_profile_block(user_data))
+        + await stats_block(user_data.get('user_id'), user_data.get('played_count', 0))
         + f"\n\n🖇 <b>Ссылка на профиль:</b>\n"
         f"<code>https://t.me/{bot_username}?start=us_{user_data.get('_id')}</code>"
     )
