@@ -105,7 +105,7 @@ async def get_search_kb(items: list, query: str, page: int, pages_all: int, orig
         artist   = track.get('artist') or track.get('title') or 'Unknown'
         title    = track.get('title') or track.get('name') or 'Unknown'
         duration = int(track.get('duration') or 0)
-        dur_str  = f"{duration // 60}:{duration % 60:02d}" if duration else "?:??"
+        dur_str  = f"{duration // 60}:{duration % 60:02d}" if duration else "--:--"
         if track.get('is_downloaded'):
             text = f"✅ {artist} — {title} [{dur_str}]"
             builder.button(text=text, callback_data=cb, style='success')

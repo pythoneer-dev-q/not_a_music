@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import BufferedInputFile, CallbackQuery, InputMediaAudio
 
-from core.app_logic import downloader, TelegramProgressReporter
+from core.app_logic import downloader, TelegramProgressReporter, track_display_name
 from database import actions_db, bot_db, music_db, nav_db, settings_db
 from handlers import fsm_classes
 from handlers.handlers import render_search
@@ -182,7 +182,7 @@ async def _deliver_track(call: CallbackQuery, t_id: str, origin: str, next_paylo
             pass
 
     search_data = await music_db.get_request_by_id(t_id)
-    t_name = f"{((search_data or {}).get('artist') or '')} ? {((search_data or {}).get('title') or '')}".strip(" ?")
+    t_name = track_display_name((search_data or {}).get('artist'), (search_data or {}).get('title'))
     reporter = TelegramProgressReporter(_edit_progress, title=t_name)
 
     try:
@@ -234,12 +234,15 @@ async def _deliver_track(call: CallbackQuery, t_id: str, origin: str, next_paylo
 
     except Exception as e:
         print(f"Download Error ({t_id}): {e}")
-        err_text = "?? ???? ???? ??????? ???????????????? (SoundCloud Go+) ? ?????????? ??? ??????????? ??????????." if "DRM_OR_NOT_FOUND" in str(e) else t('error_generic')
+        err_text = ("❌ Этот трек доступен только целиком по подписке SoundCloud Go+ "
+                    "(защита DRM). Попробуйте другой трек.") if "DRM_OR_NOT_FOUND" in str(e) else t('error_generic')
         try:
             await status_msg.edit_text(err_text, parse_mode='HTML')
         except Exception:
             pass
-        await call.answer("?? ???? ??????? ????????????????" if "DRM_OR_NOT_FOUND" in str(e) else t('error_generic'), show_alert=True)
+        await call.answer(
+            "❌ Трек недоступен: он защищён DRM (SoundCloud Go+)" if "DRM_OR_NOT_FOUND" in str(e)
+            else t('error_generic'), show_alert=True)
 
 
 @zrouter.callback_query(F.data == 'call_to_bot')

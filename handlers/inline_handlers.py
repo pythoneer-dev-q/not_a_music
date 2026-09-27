@@ -9,7 +9,7 @@ from aiogram.types import (
     InputMediaAudio, InputTextMessageContent,
 )
 
-from core.app_logic import downloader, TelegramProgressReporter
+from core.app_logic import downloader, TelegramProgressReporter, track_display_name
 from database import music_db
 from utils import kbs, messages
 from utils.i18n import t
@@ -154,7 +154,7 @@ async def play_track_inline(call: CallbackQuery):
                 pass
 
         search_data = await music_db.get_request_by_id(t_id)
-        t_name = f"{((search_data or {}).get('artist') or '')} ? {((search_data or {}).get('title') or '')}".strip(" ?")
+        t_name = track_display_name((search_data or {}).get('artist'), (search_data or {}).get('title'))
         reporter = TelegramProgressReporter(_edit_text, title=t_name)
         await _edit_text(t('uploading'))
 

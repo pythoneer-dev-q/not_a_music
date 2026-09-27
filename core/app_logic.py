@@ -1,8 +1,11 @@
 """
-SoundCloud + YouTube Hybrid Client via yt-dlp.
-??????????? ????? ? ?????????? ? SoundCloud ? ?????????????? fallback ?? YouTube.
+Гибридный клиент SoundCloud + YouTube на базе yt-dlp.
+
+Поиск идёт в SoundCloud, а если трек защищён (SoundCloud Go+/DRM) —
+автоматически подбирается полноценная версия на YouTube.
 """
 import asyncio
+import html
 import io
 import socket
 import time
@@ -12,6 +15,15 @@ import aiohttp
 from aiohttp import ClientTimeout
 import yt_dlp
 
+# Заполненный/пустой блок прогресс-бара (экранированные литералы — не ломаются
+# при любой кодировке исходника).
+BAR_FILLED = "\u2588"
+BAR_EMPTY = "\u2591"
+
+# Иконки, используемые в прогрессе загрузки.
+ICON_HOURGLASS = "\u23f3"
+ICON_DOWNLOAD = "\u2b07"
+
 
 class _QuietLogger:
     def debug(self, msg): pass
@@ -20,16 +32,27 @@ class _QuietLogger:
 
 
 def format_progress_bar(downloaded: int, total: int, width: int = 10) -> str:
-    """???????? ????????-???: [??????????] 45% (3.2/7.1 MB)"""
+    """Собирает прогресс-бар вида: [██████░░░░] 45% (3.2/7.1 MB)."""
+    downloaded = max(0, int(downloaded or 0))
+    total = max(0, int(total or 0))
     if total <= 0:
         mb = downloaded / 1_048_576
-        return f"? <b>?????????</b> <code>{mb:.1f} MB</code>"
-    pct = min(1.0, max(0.0, downloaded / total))
+        return f"{ICON_HOURGLASS} <b>Загрузка…</b> <code>{mb:.1f} MB</code>"
+    pct = min(1.0, downloaded / total)
     filled = int(width * pct)
-    bar = "\u2588" * filled + "\u2591" * (width - filled)
+    bar = BAR_FILLED * filled + BAR_EMPTY * (width - filled)
     dl_mb = downloaded / 1_048_576
     tot_mb = total / 1_048_576
     return f"<code>[{bar}] {int(pct * 100)}%</code> ({dl_mb:.1f}/{tot_mb:.1f} MB)"
+
+
+def track_display_name(artist: str = "", title: str = "") -> str:
+    """Собирает подпись «Исполнитель — Название» без лишних разделителей."""
+    artist = str(artist or "").strip().strip("-—–").strip()
+    title = str(title or "").strip().strip("-—–").strip()
+    if artist and title and artist.lower() != title.lower():
+        return f"{artist} — {title}"
+    return artist or title
 
 
 class TelegramProgressReporter:
@@ -37,20 +60,27 @@ class TelegramProgressReporter:
 
     def __init__(self, edit_func: Callable, title: str = ""):
         self._edit = edit_func
-        self._title = title
+        self._title = html.escape(track_display_name(title=title), quote=False) if title else ""
         self._last_update = 0.0
+
+    def render(self, downloaded: int, total: int) -> str:
+        """Готовый текст сообщения о прогрессе (HTML)."""
+        if self._title:
+            header = f"{ICON_DOWNLOAD} <b>Загружаю трек</b>\n<i>{self._title}</i>\n\n"
+        else:
+            header = f"{ICON_DOWNLOAD} <b>Загружаю трек…</b>\n\n"
+        return f"{header}{format_progress_bar(downloaded, total)}"
 
     async def update(self, downloaded: int, total: int, force: bool = False):
         now = time.monotonic()
         if not force and (now - self._last_update) < self.UPDATE_INTERVAL:
             return
         self._last_update = now
-        bar_text = format_progress_bar(downloaded, total)
-        header = f"? <b>???????? ?????</b>\n<i>{self._title}</i>\n\n" if self._title else "? <b>???????? ??????</b>\n\n"
         try:
-            await self._edit(f"{header}{bar_text}")
+            await self._edit(self.render(downloaded, total))
         except Exception:
             pass
+
 
 def _clean_track_id(raw_id: str) -> str:
     raw = str(raw_id).strip()
@@ -61,6 +91,155 @@ def _clean_track_id(raw_id: str) -> str:
 
 _search_cache: dict = {}
 _cache_ttl = 180
+
+# ─────────── SoundCloud api-v2: определение премиум/DRM-треков ───────────
+
+_SC_API_BASE = "https://api-v2.soundcloud.com/"
+# Кэш состояний треков: id -> (state_dict, expires_at)
+_track_state_cache: dict = {}
+_state_ttl = 3600
+# Протоколы, которые yt-dlp считает DRM-защищёнными.
+_DRM_PROTOCOLS = ("ctr-", "cbc-")
+# client_id SoundCloud, который достаёт сам yt-dlp (кэшируется на процесс).
+_sc_client_id: Optional[str] = None
+
+
+class _ApiUnauthorized(Exception):
+    """SoundCloud отклонил client_id — нужно получить новый."""
+
+
+def _load_client_id(force: bool = False) -> Optional[str]:
+    """Достаёт client_id SoundCloud тем же способом, что и yt-dlp."""
+    global _sc_client_id
+    if _sc_client_id and not force:
+        return _sc_client_id
+    _sc_client_id = None
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True,
+                               "logger": _QuietLogger()}) as ydl:
+            extractor = ydl.get_info_extractor("Soundcloud")
+            extractor.set_downloader(ydl)
+            extractor.initialize()
+            _sc_client_id = getattr(extractor, "_CLIENT_ID", None) or None
+    except Exception:
+        _sc_client_id = None
+    return _sc_client_id
+
+
+def _is_playable_transcoding(transcoding: dict) -> bool:
+    """True, если транскодинг можно воспроизвести без подписки и без DRM."""
+    if not isinstance(transcoding, dict):
+        return False
+    protocol = str((transcoding.get("format") or {}).get("protocol") or "")
+    url = str(transcoding.get("url") or "")
+    if protocol.startswith(_DRM_PROTOCOLS) or "/encrypted-hls" in url:
+        return False
+    if transcoding.get("snipped") is True or "/preview/" in url:
+        return False
+    return bool(protocol or url)
+
+
+def is_premium_track(state: Optional[dict]) -> bool:
+    """True, если трек недоступен целиком (SoundCloud Go+, DRM или блокировка).
+
+    Пустое состояние трактуется как «нет данных» — такой трек не отбрасываем,
+    чтобы не терять результаты при недоступности api-v2.
+    """
+    if not state:
+        return False
+    policy = str(state.get("policy") or "").upper()
+    if policy and policy != "ALLOW":
+        return True
+    if state.get("streamable") is False:
+        return True
+    track_state = state.get("state")
+    if track_state and track_state != "finished":
+        return True
+    if str(state.get("monetization_model") or "").upper() == "SUB_HIGH_TIER":
+        return True
+    transcodings = (state.get("media") or {}).get("transcodings") or []
+    if transcodings and not any(_is_playable_transcoding(t) for t in transcodings):
+        return True
+    return False
+
+
+async def _api_get(session: aiohttp.ClientSession, path: str, params: dict):
+    """GET-запрос к api-v2.soundcloud.com (бросает _ApiUnauthorized на 401/403)."""
+    async with session.get(f"{_SC_API_BASE}{path}", params=params,
+                           timeout=ClientTimeout(total=15)) as resp:
+        if resp.status in (401, 403):
+            raise _ApiUnauthorized()
+        resp.raise_for_status()
+        return await resp.json(content_type=None)
+
+
+async def fetch_track_states(track_ids) -> dict:
+    """Батч-запрос состояний треков (policy/DRM/streamable) через api-v2."""
+    ids = [str(i) for i in track_ids if i]
+    if not ids:
+        return {}
+
+    loop = asyncio.get_event_loop()
+    session = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(family=socket.AF_INET, limit=10))
+    result: dict = {}
+    try:
+        pending = ids
+        for attempt in (0, 1):
+            client_id = await loop.run_in_executor(
+                None, lambda f=attempt > 0: _load_client_id(f))
+            if not client_id:
+                return result
+            unauthorized = False
+            retry: list = []
+            for start in range(0, len(pending), 50):
+                chunk = pending[start:start + 50]
+                try:
+                    data = await _api_get(
+                        session, "tracks",
+                        {"ids": ",".join(chunk), "client_id": client_id})
+                except _ApiUnauthorized:
+                    unauthorized = True
+                    retry.extend(chunk)
+                    continue
+                except Exception:
+                    continue
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and item.get("id") is not None:
+                            result[str(item["id"])] = item
+            if not unauthorized or not retry:
+                break
+            pending = retry
+    finally:
+        await session.close()
+    return result
+
+
+async def get_track_states(track_ids, use_cache: bool = True) -> dict:
+    """Состояния треков с кэшем в памяти (чтобы не дёргать API на каждой странице)."""
+    ids = [str(i) for i in track_ids if i]
+    if not ids:
+        return {}
+    # Простейшая защита от неограниченного роста кэша в долгоживущем боте.
+    if len(_track_state_cache) > 5000:
+        _track_state_cache.clear()
+    now = time.monotonic()
+    result: dict = {}
+    missing: list = []
+    for tid in ids:
+        cached = _track_state_cache.get(tid)
+        if use_cache and cached and now < cached[1]:
+            result[tid] = cached[0]
+        else:
+            missing.append(tid)
+    if not missing:
+        return result
+    fetched = await fetch_track_states(missing)
+    for tid, state in fetched.items():
+        _track_state_cache[tid] = (state, now + _state_ttl)
+    result.update(fetched)
+    return result
 
 
 class MusicClient:
@@ -130,16 +309,12 @@ class MusicClient:
 
         from database import settings_db
         per_page = limit or int(await settings_db.get("SEARCH_LIMIT") or self.LIMIT_ON_PAGE)
-        fetch = per_page * 3
-        start = (page - 1) * per_page + 1
-        end = start + fetch - 1
 
         loop = asyncio.get_event_loop()
 
-        # 1. ??????? ??????? SoundCloud
-        sc_opts = {**self._ydl_opts(), "extract_flat": True, "playlist_items": f"{start}-{end}"}
-        # ??????????? ???? ? ???????, ????? ?????????????? ????????? 30-????????? ??????
-        total_fetch = max(25, (page * per_page) + 15)
+        # 1. Поиск в SoundCloud (flat-режим: без выкачивания форматов)
+        # Забираем с запасом: премиум/сниппеты отсеиваются уже после запроса.
+        total_fetch = min(200, max(40, page * per_page * 3))
         sc_opts = {**self._ydl_opts(), "extract_flat": True}
         sc_url = f"scsearch{total_fetch}:{query}"
 
@@ -152,8 +327,8 @@ class MusicClient:
                 return []
 
         raw_entries = await loop.run_in_executor(None, _sc_search)
-        
-        # ??????? ??????????: ??????????? ??? ????? ?????? 35 ?????? ? ????? ??????
+
+        # Предфильтр: мусор, реклама и 30-секундные сниппеты
         valid_sc_entries = []
         for e in (raw_entries or []):
             if not e:
@@ -162,7 +337,10 @@ class MusicClient:
                 continue
             valid_sc_entries.append(e)
 
-        # ????????? ?? ???????? ??????
+        # 2. Убираем премиум-треки SoundCloud Go+ (policy=SNIP, DRM, блокировки)
+        valid_sc_entries = await self._drop_premium(valid_sc_entries)
+
+        # Постраничная нарезка уже очищенного списка
         page_start = (page - 1) * per_page
         page_slice = valid_sc_entries[page_start : page_start + per_page]
 
@@ -187,7 +365,7 @@ class MusicClient:
                 "source": "sc",
             })
 
-# 2. ???? SoundCloud ?????? ????/????? (??? ????????? ???? ?? IP) ? ?????????? YouTube
+        # Если после очистки SoundCloud дал мало результатов — добираем из YouTube.
         if len(items) < per_page:
             needed = per_page - len(items)
             yt_opts = {**self._ydl_opts(), "extract_flat": True}
@@ -230,6 +408,30 @@ class MusicClient:
         _search_cache[cache_key] = (res, now + _cache_ttl)
         return res
 
+    async def _drop_premium(self, entries: list) -> list:
+        """Убирает премиум-треки SoundCloud Go+ (30-сек сниппеты, DRM, блокировки).
+
+        Состояния треков берутся одним батч-запросом к api-v2 и кэшируются.
+        Если API недоступен — возвращаем список как есть (остаётся фильтр по
+        длительности из ``_is_garbage``).
+        """
+        if not entries:
+            return entries
+        ids = [_clean_track_id(e.get("id") or "") for e in entries]
+        states = await get_track_states(ids)
+        if not states:
+            return entries
+        kept = []
+        for entry, track_id in zip(entries, ids):
+            state = states.get(track_id)
+            if is_premium_track(state):
+                continue
+            full_duration = (state or {}).get("full_duration")
+            if full_duration:
+                entry["duration"] = full_duration / 1000
+            kept.append(entry)
+        return kept
+
     async def top_tracks(self, page: int = 1) -> dict:
         return await self.search_track("popular music", page=page)
 
@@ -237,7 +439,7 @@ class MusicClient:
         track_id = _clean_track_id(track_id)
         loop = asyncio.get_event_loop()
 
-        # YouTube ????
+        # Ветка YouTube
         if track_id.startswith("yt_"):
             real_id = track_id[3:]
             yt_url = f"https://www.youtube.com/watch?v={real_id}"
@@ -286,12 +488,13 @@ class MusicClient:
 
         info = await loop.run_in_executor(None, _extract_sc)
 
-        # ???? SoundCloud ?? ????? ?????? ???? (DRM/????) ? ???? ???????????? ?? YouTube
+        # Если SoundCloud отдал только обрезанную версию (DRM/SoundCloud Go+) —
+        # ищем полноценный трек на YouTube.
         formats = (info.get("formats") or []) if info else []
         is_drm_or_preview = (not info) or (not formats) or all("preview" in f.get("format_id", "").lower() for f in formats)
 
         if is_drm_or_preview:
-            # ??????? DRM SoundCloud Go+: ????????? ???????? ?????????? ?? YouTube
+            # Обход DRM SoundCloud Go+: подбираем полную версию на YouTube
             title_hint = (info.get("title") if info else None) or ""
             uploader_hint = (info.get("uploader") if info else None) or ""
             fallback_query = f"{uploader_hint} {title_hint}".strip()
@@ -409,6 +612,6 @@ class MusicClient:
         return await self._stream_to_buffer(url)
 
 
-# ????????????? ?? ??????? ?????????
+# Обратная совместимость со старым именем класса
 SoundCloudClient = MusicClient
 downloader = MusicClient()

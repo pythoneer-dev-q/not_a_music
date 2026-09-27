@@ -194,7 +194,7 @@ async def create_playlist(from_user: int, pl_name: str):
 
 
 async def get_top_tracks(page: int = 1, limit: int = 7) -> dict:
-    """??? ?????? ?? ?????????? ?? m_views."""
+    """Топ треков по количеству прослушиваний из m_views."""
     skip = max(0, (page - 1) * limit)
     cursor = database['m_views'].find({'count': {'$gt': 0}}).sort('count', -1).skip(skip).limit(limit)
     views_docs = await cursor.to_list(length=limit)

@@ -122,7 +122,7 @@ async def render_search(call: CallbackQuery, query: str, page: int):
         title = t('top_chart')
         cached_tracks = []
         if not search_data or not search_data.get('items'):
-            # Fallback ?? ?????????? ????? SoundCloud ???? ???? ??????
+            # Если в базе ещё нет прослушиваний — берём чарт прямо из SoundCloud
             search_data = await downloader.top_tracks(page=page)
     else:
         cached_task = asyncio.create_task(music_db.search_downloaded_tracks(query, limit=3))
