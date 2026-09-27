@@ -153,7 +153,9 @@ async def play_track_inline(call: CallbackQuery):
             except Exception:
                 pass
 
-        reporter = TelegramProgressReporter(_edit_text, prefix="⏬ <b>Загружаю трек…</b>\n")
+        search_data = await music_db.get_request_by_id(t_id)
+        t_name = f"{((search_data or {}).get('artist') or '')} ? {((search_data or {}).get('title') or '')}".strip(" ?")
+        reporter = TelegramProgressReporter(_edit_text, title=t_name)
         await _edit_text(t('uploading'))
 
         buf = await downloader.download_track(t_id, progress_cb=reporter.update)

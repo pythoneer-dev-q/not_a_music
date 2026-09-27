@@ -20,19 +20,24 @@ class _QuietLogger:
 
 
 def format_progress_bar(downloaded: int, total: int, width: int = 10) -> str:
+    """???????? ????????-???: [??????????] 45% (3.2/7.1 MB)"""
     if total <= 0:
-        return f"? ????????? {downloaded / 1_048_576:.1f} MB"
-    pct = downloaded / total
-    bar = "?" * int(width * pct) + "?" * (width - int(width * pct))
-    return f"[{bar}] {int(pct * 100)}%  {downloaded / 1_048_576:.1f}/{total / 1_048_576:.1f} MB"
+        mb = downloaded / 1_048_576
+        return f"? <b>?????????</b> <code>{mb:.1f} MB</code>"
+    pct = min(1.0, max(0.0, downloaded / total))
+    filled = int(width * pct)
+    bar = "\u2588" * filled + "\u2591" * (width - filled)
+    dl_mb = downloaded / 1_048_576
+    tot_mb = total / 1_048_576
+    return f"<code>[{bar}] {int(pct * 100)}%</code> ({dl_mb:.1f}/{tot_mb:.1f} MB)"
 
 
 class TelegramProgressReporter:
-    UPDATE_INTERVAL = 2.0
+    UPDATE_INTERVAL = 1.8
 
-    def __init__(self, edit_func: Callable, prefix: str = "? ???????? ?????\n"):
+    def __init__(self, edit_func: Callable, title: str = ""):
         self._edit = edit_func
-        self._prefix = prefix
+        self._title = title
         self._last_update = 0.0
 
     async def update(self, downloaded: int, total: int, force: bool = False):
@@ -40,11 +45,12 @@ class TelegramProgressReporter:
         if not force and (now - self._last_update) < self.UPDATE_INTERVAL:
             return
         self._last_update = now
+        bar_text = format_progress_bar(downloaded, total)
+        header = f"? <b>???????? ?????</b>\n<i>{self._title}</i>\n\n" if self._title else "? <b>???????? ??????</b>\n\n"
         try:
-            await self._edit(f"{self._prefix}{format_progress_bar(downloaded, total)}")
+            await self._edit(f"{header}{bar_text}")
         except Exception:
             pass
-
 
 def _clean_track_id(raw_id: str) -> str:
     raw = str(raw_id).strip()
