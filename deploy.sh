@@ -17,7 +17,10 @@ echo "📦 Обновляю список пакетов и ставлю зави
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv ffmpeg curl git
+    python3 python3-pip python3-venv ffmpeg curl git unzip \
+    nodejs
+# node нужен yt-dlp: без JS-рантайма он не расшифровывает n-sig у YouTube
+# и отдаёт форматы 48 kbps + обрывает загрузку на первом мегабайте.
 
 if ! command -v mongod &> /dev/null && ! command -v mongodb &> /dev/null; then
     echo "🗄 Ставлю MongoDB..."

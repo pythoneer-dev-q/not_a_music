@@ -1,10 +1,21 @@
 """Тесты новых разделов: помощь, история, язык, статистика, шаринг, быстрые запросы."""
 
 import asyncio
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from core import app_logic
+from core.app_logic import (
+    MusicClient,
+    TrackUnavailable,
+    _pick_best_audio,
+    parse_content_range,
+    score_candidate,
+    ytdl_env_opts,
+)
 from database import actions_db, nav_db
 from database.nav_db import RECENT_QUERIES_MAX, clean_query
 from handlers import handlers as h_handlers
@@ -267,6 +278,98 @@ class TestTopPlsKb(unittest.IsolatedAsyncioTestCase):
         self.assertIn('tpls:3', callbacks)
 
 
+class TestAudioPicker(unittest.TestCase):
+    """Выбор формата по битрейту — здесь была причина «шакального» звука."""
+
+    @staticmethod
+    def _fmt(fid, ext, abr, protocol="https", **extra):
+        data = {"format_id": fid, "ext": ext, "abr": abr, "protocol": protocol,
+                "url": f"https://cdn/{fid}", "vcodec": "none"}
+        data.update(extra)
+        return data
+
+    def test_youtube_picks_128k_not_48k(self):
+        # реальный порядок, который отдаёт yt-dlp: 139 (48k) идёт ПЕРВЫМ
+        formats = [
+            self._fmt("sb0", "mhtml", 0, protocol="mhtml"),
+            self._fmt("139", "m4a", 48.835),
+            self._fmt("249", "webm", 53.314),
+            self._fmt("140", "m4a", 129.516),
+            self._fmt("251", "webm", 137.46),
+        ]
+        picked = _pick_best_audio(formats)
+        self.assertEqual(picked["format_id"], "140")
+        self.assertAlmostEqual(picked["abr"], 129.516)
+
+    def test_storyboards_and_video_skipped(self):
+        formats = [
+            self._fmt("137", "mp4", 0, protocol="https", vcodec="avc1"),
+            self._fmt("sb0", "mhtml", 0, protocol="mhtml", format_note="storyboard"),
+            self._fmt("140", "m4a", 129.5),
+        ]
+        self.assertEqual(_pick_best_audio(formats)["format_id"], "140")
+
+    def test_soundcloud_hls_allowed_and_best_bitrate(self):
+        # SoundCloud отдаёт ТОЛЬКО HLS — старый код брал m3u8-ссылку как аудио
+        formats = [
+            self._fmt("hls_mp3_1_0", "mp3", 128, protocol="m3u8_native"),
+            self._fmt("hls_aac_96k", "m4a", 96, protocol="m3u8_native"),
+            self._fmt("hls_aac_160k", "m4a", 160, protocol="m3u8_native"),
+        ]
+        self.assertEqual(_pick_best_audio(formats)["format_id"], "hls_aac_160k")
+        self.assertIsNone(_pick_best_audio(formats, allow_hls=False),
+                          "без allow_hls HLS-дорожки отбрасываются")
+
+    def test_preview_snippets_skipped(self):
+        formats = [
+            self._fmt("http_mp3_0_0_preview", "mp3", 128, protocol="http"),
+            self._fmt("http_mp3_0_0", "mp3", 128, protocol="http"),
+        ]
+        self.assertEqual(_pick_best_audio(formats)["format_id"], "http_mp3_0_0")
+
+    def test_drm_skipped(self):
+        formats = [self._fmt("140", "m4a", 129, has_drm=True),
+                   self._fmt("139", "m4a", 48)]
+        self.assertEqual(_pick_best_audio(formats)["format_id"], "139")
+
+    def test_no_formats(self):
+        self.assertIsNone(_pick_best_audio(None))
+        self.assertIsNone(_pick_best_audio([]))
+        self.assertIsNone(_pick_best_audio([{"url": None}]))
+
+    def test_much_better_webm_wins_over_m4a(self):
+        formats = [self._fmt("140", "m4a", 64), self._fmt("251", "webm", 160)]
+        self.assertEqual(_pick_best_audio(formats)["format_id"], "251")
+
+
+class TestCandidateScorer(unittest.TestCase):
+    def test_duration_mismatch_is_penalised(self):
+        same = {"title": "Artist - Song (Official Audio)", "duration": 205}
+        other = {"title": "Artist - Song (Slowed + Reverb)", "duration": 260}
+        self.assertGreater(score_candidate("Artist Song", same, 200),
+                           score_candidate("Artist Song", other, 200))
+
+    def test_slowed_is_penalised(self):
+        query = "artist song"
+        clean = {"title": "Artist - Song", "duration": 200}
+        slowed = {"title": "Artist - Song (SLOWED)", "duration": 200}
+        self.assertGreater(score_candidate(query, clean, 200),
+                           score_candidate(query, slowed, 200))
+
+    def test_slowed_in_query_is_not_penalised(self):
+        cand = {"title": "Artist - Song (SLOWED)", "duration": 210}
+        self.assertGreater(score_candidate("artist song slowed", cand, 210), 3.0)
+
+    def test_word_overlap_matters(self):
+        with_words = {"title": "Kendrick Lamar - luther", "duration": 177}
+        without = {"title": "random clip", "duration": 177}
+        self.assertGreater(score_candidate("kendrick lamar luther", with_words, 177),
+                           score_candidate("kendrick lamar luther", without, 177))
+
+    def test_no_crash_on_empty(self):
+        self.assertEqual(score_candidate("", {}), 0.0)
+
+
 class TestStatsBlock(unittest.IsolatedAsyncioTestCase):
     async def test_block_contains_all_counters(self):
         with mock.patch.object(messages.actions_db, 'count_user_likes',
@@ -341,6 +444,58 @@ class TestPlayedCounter(unittest.IsolatedAsyncioTestCase):
             shown = await service_handlers._maybe_show_ad(_fake_call())
         self.assertFalse(shown)
         incr.assert_awaited_once()
+
+
+class TestContentRange(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(parse_content_range("bytes 0-1023/4096"), (0, 1023, 4096))
+        self.assertEqual(parse_content_range("bytes 100-199/*"), (100, 199, 0))
+        self.assertEqual(parse_content_range(""), (0, 0, 0))
+        self.assertEqual(parse_content_range("garbage"), (0, 0, 0))
+        self.assertEqual(parse_content_range("BYTES 5-9/10"), (5, 9, 10))
+
+
+class TestYtdlEnvOpts(unittest.TestCase):
+    def test_js_runtimes_is_dict(self):
+        opts = ytdl_env_opts()
+        self.assertIsInstance(opts["js_runtimes"], dict)
+        self.assertIn("deno", opts["js_runtimes"])
+        self.assertIn("node", opts["js_runtimes"])
+
+    def test_path_syntax(self):
+        with mock.patch.dict(os.environ, {"YTDLP_JS_RUNTIMES": "deno:/opt/bin/deno"}):
+            opts = ytdl_env_opts()
+        self.assertEqual(opts["js_runtimes"]["deno"]["path"], "/opt/bin/deno")
+
+    def test_no_cookie_file_by_default(self):
+        self.assertNotIn("cookiefile", ytdl_env_opts())
+
+    def test_existing_cookie_file_is_used(self):
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as fh:
+            path = fh.name
+        try:
+            with mock.patch.dict(os.environ, {"YTDLP_COOKIES": path}):
+                self.assertEqual(ytdl_env_opts()["cookiefile"], path)
+        finally:
+            os.unlink(path)
+
+    def test_ydl_opts_are_accepted_by_yt_dlp(self):
+        """Опции должны быть валидны — иначе ломается всё извлечение сразу."""
+        import yt_dlp
+        with yt_dlp.YoutubeDL(MusicClient._ydl_opts()):
+            pass
+
+    def test_ydl_opts_expose_diagnostics(self):
+        opts = MusicClient._ydl_opts()
+        self.assertIsInstance(opts["logger"], app_logic._DiagLogger)
+        self.assertFalse(opts["no_warnings"], "предупреждения yt-dlp должны быть видны")
+
+    def test_logger_deduplicates(self):
+        logger = app_logic._DiagLogger()
+        with mock.patch.object(app_logic, "_log") as log:
+            for _ in range(10):
+                logger.warning("same message")
+            self.assertLessEqual(log.call_count, app_logic._DiagLogger._LIMIT)
 
 
 if __name__ == "__main__":
