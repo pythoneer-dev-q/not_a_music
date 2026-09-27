@@ -17,7 +17,7 @@ echo "📦 Обновляю список пакетов и ставлю зави
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \
-    python3 python3-pip python3-venv ffmpeg curl git
+    python3 python3-pip python3-venv ffmpeg curl git nodejs
 
 if ! command -v mongod &> /dev/null && ! command -v mongodb &> /dev/null; then
     echo "🗄 Ставлю MongoDB..."
