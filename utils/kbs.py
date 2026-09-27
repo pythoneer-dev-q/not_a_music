@@ -127,8 +127,7 @@ async def get_search_kb(items: list, query: str, page: int, pages_all: int, orig
         else:
             text = f"🎵 {artist} — {title} [{dur_str}]"
             builder.button(text=text, callback_data=ids[i])
-        builder.button(text=t('btn_add_fav_short'), callback_data=fav_ids[i])
-        builder.button(text=t('btn_add_pl_short'), callback_data=pl_ids[i])
+
 
     builder.adjust(*([3] * len(items)))
 
