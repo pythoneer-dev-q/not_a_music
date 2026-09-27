@@ -218,10 +218,17 @@ async def user_playlists(pllists: list):
     pl_max = int(await settings_db.get('PLAYLISTS_MAX'))
     builder = InlineKeyboardBuilder()
     for pl in pllists or []:
-        builder.row(InlineKeyboardButton(
-            text=f'🎵 {pl.get("pl_name")}',
-            callback_data=f'plv:{pl.get("_id")}:1'
-        ))
+        pl_id = pl.get("_id")
+        builder.row(
+            InlineKeyboardButton(
+                text=f'🎵 {pl.get("pl_name")}',
+                callback_data=f'plv:{pl_id}:1'
+            ),
+            InlineKeyboardButton(
+                text='🗑',
+                callback_data=f'pl_pdel|{pl_id}'
+            )
+        )
     if len(pllists or []) < pl_max:
         builder.row(InlineKeyboardButton(text=t('btn_create_pl'), callback_data='pl_new'))
     builder.row(InlineKeyboardButton(text=t('btn_to_menu'), callback_data='user_menu'))

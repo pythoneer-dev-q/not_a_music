@@ -191,3 +191,40 @@ async def create_playlist(from_user: int, pl_name: str):
     }
     await playlist_col.insert_one(doc)
     return doc
+
+
+async def get_top_tracks(page: int = 1, limit: int = 7) -> dict:
+    """??? ?????? ?? ?????????? ?? m_views."""
+    skip = max(0, (page - 1) * limit)
+    cursor = database['m_views'].find({'count': {'$gt': 0}}).sort('count', -1).skip(skip).limit(limit)
+    views_docs = await cursor.to_list(length=limit)
+    
+    items = []
+    for vd in views_docs:
+        t_id = str(vd['_id'])
+        m_doc = await music_col.find_one({'_id': t_id})
+        s_doc = await search_col.find_one({'_id': t_id}) if not m_doc else None
+        doc = m_doc or s_doc or {}
+        
+        artist = doc.get('artist') or doc.get('title') or 'SoundCloud'
+        title = doc.get('title') or doc.get('name') or f'Track {t_id}'
+        dur = doc.get('duration') or 0
+        cover = doc.get('cover') or ''
+        
+        items.append({
+            'id': t_id,
+            'fileId': t_id,
+            'title': title,
+            'artist': artist,
+            'duration': int(dur),
+            'imageInfo': {'imageUrl': cover},
+            'url': doc.get('url') or '',
+            'query_str': f"{artist} - {title}",
+            'views': vd.get('count', 0),
+            'is_downloaded': bool(doc.get('file')),
+            'file': doc.get('file'),
+        })
+    
+    total = await database['m_views'].count_documents({'count': {'$gt': 0}})
+    pages_all = max(1, -(-total // limit))
+    return {'items': items, 'paginationInfo': {'lastPage': pages_all}}

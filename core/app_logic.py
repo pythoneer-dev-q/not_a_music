@@ -46,6 +46,9 @@ def _clean_sc_id(raw_id: str) -> str:
     return str(raw_id)
 
 
+_search_cache: dict = {}
+_cache_ttl = 180
+
 class SoundCloudClient:
     LIMIT_ON_PAGE = 7
     MIN_DURATION = 20   # треки короче 20 сек считаются мусором
@@ -68,8 +71,18 @@ class SoundCloudClient:
 
     @staticmethod
     def _ydl_opts(quiet: bool = True) -> dict:
-        return {"quiet": quiet, "no_warnings": True, "ignoreerrors": True,
-                "socket_timeout": 15, "retries": 3}
+        return {
+            "quiet": quiet,
+            "no_warnings": True,
+            "ignoreerrors": True,
+            "socket_timeout": 10,
+            "retries": 2,
+            "extract_flat": True,
+            "skip_download": True,
+            "lazy_extractors": True,
+            "nocheckcertificate": True,
+            "source_address": "0.0.0.0",
+        }
 
     @staticmethod
     def _extract_cover(entry: dict) -> str:
@@ -82,17 +95,24 @@ class SoundCloudClient:
         return entry.get("thumbnail") or DEFAULT_COVER
 
     @staticmethod
-    def _is_garbage(entry: dict, min_dur: int = 20) -> bool:
-        """Возвращает True если трек — мусор (реклама, подкаст-секунда, пустышка)."""
-        dur = entry.get("duration") or 0
-        title = (entry.get("title") or "").strip()
-        if dur and dur < min_dur:
+    def _is_garbage(entry: dict, min_dur: int = 35) -> bool:
+        dur = float(entry.get("duration") or 0)
+        title = (entry.get("title") or "").strip().lower()
+        if dur and (dur < min_dur or abs(dur - 30.0) < 0.9):
             return True
-        if not title or title.lower() in ("", "untitled", "[deleted]", "[private]"):
+        if not title or title in ("", "untitled", "[deleted]", "[private]", "deleted"):
+            return True
+        if "preview" in title or "snippet" in title:
             return True
         return False
 
     async def search_track(self, query: str, page: int = 1, limit: int = None) -> dict:
+        cache_key = f"{query.lower().strip()}_{page}_{limit}"
+        now = time.monotonic()
+        if cache_key in _search_cache:
+            res, exp = _search_cache[cache_key]
+            if now < exp:
+                return res
         from database import settings_db
         per_page = limit or int(await settings_db.get("SEARCH_LIMIT") or self.LIMIT_ON_PAGE)
         # Запрашиваем больше, чтобы после фильтрации осталось нужное кол-во
@@ -137,7 +157,9 @@ class SoundCloudClient:
             })
 
         pages_all = page + 1 if len(items) >= per_page else page
-        return {"items": items, "paginationInfo": {"lastPage": pages_all}}
+        res = {"items": items, "paginationInfo": {"lastPage": pages_all}}
+        _search_cache[cache_key] = (res, now + _cache_ttl)
+        return res
 
     async def top_tracks(self, page: int = 1) -> dict:
         return await self.search_track("popular music", page=page)
@@ -162,12 +184,21 @@ class SoundCloudClient:
 
         cover = self._extract_cover(info)
         dl_url = None
-        for fmt in (info.get("formats") or []):
+        formats = info.get("formats") or []
+        # ??????????????? DRM/preview ???????
+        valid_formats = [f for f in formats if "preview" not in f.get("format_id", "").lower()]
+        
+        for fmt in (valid_formats or formats):
             if fmt.get("protocol") == "http" and fmt.get("ext") in ("mp3", "m4a", None):
                 dl_url = fmt.get("url")
                 break
-        if not dl_url and info.get("formats"):
-            dl_url = info["formats"][-1].get("url")
+        if not dl_url and valid_formats:
+            dl_url = valid_formats[-1].get("url")
+        elif not dl_url and formats:
+            # ???? ???????? ?????? preview ???????, ???? ??????? DRM
+            if all("preview" in f.get("format_id", "").lower() for f in formats):
+                return None
+            dl_url = formats[-1].get("url")
 
         return {
             "id": str(info.get("id") or track_id),

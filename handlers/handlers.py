@@ -117,10 +117,13 @@ async def process_about(message: Message, state: FSMContext):
 async def render_search(call: CallbackQuery, query: str, page: int):
     """Отрисовка страницы результатов (поиск или топ)."""
     if query == 'top':
-        search_data = await downloader.top_tracks(page=page)
+        search_data = await music_db.get_top_tracks(page=page)
         origin = 'top'
         title = t('top_chart')
         cached_tracks = []
+        if not search_data or not search_data.get('items'):
+            # Fallback ?? ?????????? ????? SoundCloud ???? ???? ??????
+            search_data = await downloader.top_tracks(page=page)
     else:
         cached_task = asyncio.create_task(music_db.search_downloaded_tracks(query, limit=3))
         sc_task = asyncio.create_task(downloader.search_track(query, page=page))
