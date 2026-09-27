@@ -132,7 +132,10 @@ class MusicClient:
 
         # 1. ??????? ??????? SoundCloud
         sc_opts = {**self._ydl_opts(), "extract_flat": True, "playlist_items": f"{start}-{end}"}
-        sc_url = f"scsearch{end}:{query}"
+        # ??????????? ???? ? ???????, ????? ?????????????? ????????? 30-????????? ??????
+        total_fetch = max(25, (page * per_page) + 15)
+        sc_opts = {**self._ydl_opts(), "extract_flat": True}
+        sc_url = f"scsearch{total_fetch}:{query}"
 
         def _sc_search():
             try:
@@ -142,16 +145,23 @@ class MusicClient:
             except Exception:
                 return []
 
-        entries = await loop.run_in_executor(None, _sc_search)
-        entries = [e for e in entries if e][(start - 1):]
-
-        items = []
-        for e in entries:
+        raw_entries = await loop.run_in_executor(None, _sc_search)
+        
+        # ??????? ??????????: ??????????? ??? ????? ?????? 35 ?????? ? ????? ??????
+        valid_sc_entries = []
+        for e in (raw_entries or []):
+            if not e:
+                continue
             if self._is_garbage(e, self.MIN_DURATION):
                 continue
-            if len(items) >= per_page:
-                break
+            valid_sc_entries.append(e)
 
+        # ????????? ?? ???????? ??????
+        page_start = (page - 1) * per_page
+        page_slice = valid_sc_entries[page_start : page_start + per_page]
+
+        items = []
+        for e in page_slice:
             track_id = _clean_track_id(e.get("id") or "")
             title = (e.get("title") or "Unknown").strip()
             artist = (e.get("uploader") or e.get("channel") or "SoundCloud").strip()
@@ -171,7 +181,7 @@ class MusicClient:
                 "source": "sc",
             })
 
-        # 2. ???? SoundCloud ?????? ????/????? (??? ????????? ???? ?? IP) ? ?????????? YouTube
+# 2. ???? SoundCloud ?????? ????/????? (??? ????????? ???? ?? IP) ? ?????????? YouTube
         if len(items) < per_page:
             needed = per_page - len(items)
             yt_opts = {**self._ydl_opts(), "extract_flat": True}
@@ -258,7 +268,6 @@ class MusicClient:
                 "url": yt_url,
             }
 
-        # SoundCloud ????
         sc_url = f"https://api.soundcloud.com/tracks/{track_id}"
         ydl_opts = {**self._ydl_opts(), "format": "http_mp3_0_0/bestaudio[protocol=http]/bestaudio[ext=mp3]/bestaudio/best"}
 
@@ -272,17 +281,51 @@ class MusicClient:
         info = await loop.run_in_executor(None, _extract_sc)
 
         # ???? SoundCloud ?? ????? ?????? ???? (DRM/????) ? ???? ???????????? ?? YouTube
-        if not info or not info.get("formats") or all("preview" in f.get("format_id", "").lower() for f in (info.get("formats") or [])):
-            title_hint = info.get("title") if info else None
-            uploader_hint = info.get("uploader") if info else None
-            if title_hint:
-                fallback_query = f"{uploader_hint or ''} {title_hint}".strip()
-                yt_fallback_res = await self.search_track(fallback_query, limit=1)
-                for item in yt_fallback_res.get("items", []):
-                    if item.get("id", "").startswith("yt_"):
-                        return await self.get_track_info(item["id"])
-            return None
+        formats = (info.get("formats") or []) if info else []
+        is_drm_or_preview = (not info) or (not formats) or all("preview" in f.get("format_id", "").lower() for f in formats)
 
+        if is_drm_or_preview:
+            # ??????? DRM SoundCloud Go+: ????????? ???????? ?????????? ?? YouTube
+            title_hint = (info.get("title") if info else None) or ""
+            uploader_hint = (info.get("uploader") if info else None) or ""
+            fallback_query = f"{uploader_hint} {title_hint}".strip()
+            if fallback_query:
+                yt_opts = {**self._ydl_opts(), "format": "ba/b[ext=m4a]/bestaudio"}
+                def _yt_direct_find():
+                    try:
+                        with yt_dlp.YoutubeDL(yt_opts) as ydl:
+                            res = ydl.extract_info(f"ytsearch1:{fallback_query}", download=False)
+                            entries = res.get("entries") or []
+                            return entries[0] if entries else None
+                    except Exception:
+                        return None
+
+                yt_entry = await loop.run_in_executor(None, _yt_direct_find)
+                if yt_entry:
+                    audio_fmts = [
+                        f for f in (yt_entry.get("formats") or [])
+                        if f.get("vcodec") == "none" and f.get("url") and f.get("ext") in ("m4a", "webm", "mp3")
+                    ]
+                    dl_url = None
+                    for fmt in audio_fmts:
+                        if fmt.get("ext") in ("m4a", "mp3"):
+                            dl_url = fmt.get("url")
+                            break
+                    if not dl_url and audio_fmts:
+                        dl_url = audio_fmts[0].get("url")
+
+                    if dl_url:
+                        return {
+                            "id": track_id,
+                            "fileId": track_id,
+                            "title": yt_entry.get("title") or title_hint or "Unknown",
+                            "artist": yt_entry.get("uploader") or uploader_hint or "YouTube",
+                            "duration": int(yt_entry.get("duration") or info.get("duration") or 0),
+                            "download": dl_url,
+                            "imageInfo": {"imageUrl": self._extract_cover(yt_entry)},
+                            "url": f"https://www.youtube.com/watch?v={yt_entry.get('id')}",
+                        }
+            return None
         cover = self._extract_cover(info)
         dl_url = None
         formats = info.get("formats") or []
