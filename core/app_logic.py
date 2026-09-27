@@ -1,5 +1,6 @@
 """
-SoundCloud client via yt-dlp.
+SoundCloud + YouTube Hybrid Client via yt-dlp.
+??????????? ????? ? ?????????? ? SoundCloud ? ?????????????? fallback ?? YouTube.
 """
 import asyncio
 import io
@@ -10,25 +11,26 @@ from typing import Optional, Callable
 import aiohttp
 from aiohttp import ClientTimeout
 import yt_dlp
+
+
 class _QuietLogger:
     def debug(self, msg): pass
     def warning(self, msg): pass
     def error(self, msg): pass
 
 
-
 def format_progress_bar(downloaded: int, total: int, width: int = 10) -> str:
     if total <= 0:
-        return f"⏳ Загрузка… {downloaded / 1_048_576:.1f} MB"
+        return f"? ????????? {downloaded / 1_048_576:.1f} MB"
     pct = downloaded / total
-    bar = "█" * int(width * pct) + "░" * (width - int(width * pct))
+    bar = "?" * int(width * pct) + "?" * (width - int(width * pct))
     return f"[{bar}] {int(pct * 100)}%  {downloaded / 1_048_576:.1f}/{total / 1_048_576:.1f} MB"
 
 
 class TelegramProgressReporter:
     UPDATE_INTERVAL = 2.0
 
-    def __init__(self, edit_func: Callable, prefix: str = "⏬ Загружаю трек…\n"):
+    def __init__(self, edit_func: Callable, prefix: str = "? ???????? ?????\n"):
         self._edit = edit_func
         self._prefix = prefix
         self._last_update = 0.0
@@ -44,19 +46,20 @@ class TelegramProgressReporter:
             pass
 
 
-def _clean_sc_id(raw_id: str) -> str:
-    """Убирает префикс 'soundcloud:tracks:' если есть."""
-    if isinstance(raw_id, str) and raw_id.startswith("soundcloud:tracks:"):
-        return raw_id.split(":")[-1]
-    return str(raw_id)
+def _clean_track_id(raw_id: str) -> str:
+    raw = str(raw_id).strip()
+    if raw.startswith("soundcloud:tracks:"):
+        return raw.split(":")[-1]
+    return raw
 
 
 _search_cache: dict = {}
 _cache_ttl = 180
 
-class SoundCloudClient:
+
+class MusicClient:
     LIMIT_ON_PAGE = 7
-    MIN_DURATION = 20   # треки короче 20 сек считаются мусором
+    MIN_DURATION = 35
 
     def __init__(self):
         self._session: Optional[aiohttp.ClientSession] = None
@@ -118,23 +121,28 @@ class SoundCloudClient:
             res, exp = _search_cache[cache_key]
             if now < exp:
                 return res
+
         from database import settings_db
         per_page = limit or int(await settings_db.get("SEARCH_LIMIT") or self.LIMIT_ON_PAGE)
-        # Запрашиваем больше, чтобы после фильтрации осталось нужное кол-во
         fetch = per_page * 3
         start = (page - 1) * per_page + 1
-        end   = start + fetch - 1
+        end = start + fetch - 1
 
-        ydl_opts = {**self._ydl_opts(), "extract_flat": True, "playlist_items": f"{start}-{end}"}
-        url = f"scsearch{end}:{query}"
         loop = asyncio.get_event_loop()
 
-        def _search():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                return (info.get("entries") or []) if info else []
+        # 1. ??????? ??????? SoundCloud
+        sc_opts = {**self._ydl_opts(), "extract_flat": True, "playlist_items": f"{start}-{end}"}
+        sc_url = f"scsearch{end}:{query}"
 
-        entries = await loop.run_in_executor(None, _search)
+        def _sc_search():
+            try:
+                with yt_dlp.YoutubeDL(sc_opts) as ydl:
+                    info = ydl.extract_info(sc_url, download=False)
+                    return (info.get("entries") or []) if info else []
+            except Exception:
+                return []
+
+        entries = await loop.run_in_executor(None, _sc_search)
         entries = [e for e in entries if e][(start - 1):]
 
         items = []
@@ -144,22 +152,62 @@ class SoundCloudClient:
             if len(items) >= per_page:
                 break
 
-            raw_id = e.get("id") or ""
-            track_id = _clean_sc_id(str(raw_id))
-            title  = (e.get("title") or "Unknown").strip()
+            track_id = _clean_track_id(e.get("id") or "")
+            title = (e.get("title") or "Unknown").strip()
             artist = (e.get("uploader") or e.get("channel") or "SoundCloud").strip()
             duration_s = e.get("duration") or 0
-            cover  = self._extract_cover(e)
-            sc_url = e.get("url") or e.get("webpage_url") or ""
+            cover = self._extract_cover(e)
+            sc_page_url = e.get("url") or e.get("webpage_url") or ""
 
             items.append({
-                "id": track_id, "fileId": track_id,
-                "title": title, "artist": artist,
+                "id": track_id,
+                "fileId": track_id,
+                "title": title,
+                "artist": artist,
                 "duration": int(duration_s),
                 "imageInfo": {"imageUrl": cover},
-                "url": sc_url,
+                "url": sc_page_url,
                 "query_str": f"{artist} - {title}",
+                "source": "sc",
             })
+
+        # 2. ???? SoundCloud ?????? ????/????? (??? ????????? ???? ?? IP) ? ?????????? YouTube
+        if len(items) < per_page:
+            needed = per_page - len(items)
+            yt_opts = {**self._ydl_opts(), "extract_flat": True}
+            yt_url = f"ytsearch{needed + 3}:{query}"
+
+            def _yt_search():
+                try:
+                    with yt_dlp.YoutubeDL(yt_opts) as ydl:
+                        info = ydl.extract_info(yt_url, download=False)
+                        return (info.get("entries") or []) if info else []
+                except Exception:
+                    return []
+
+            yt_entries = await loop.run_in_executor(None, _yt_search)
+            for e in yt_entries:
+                if not e or len(items) >= per_page:
+                    break
+                yt_id = e.get("id")
+                if not yt_id or any(it["id"] == f"yt_{yt_id}" for it in items):
+                    continue
+                dur = float(e.get("duration") or 0)
+                if dur < 30 or dur > 1800:
+                    continue
+                title = (e.get("title") or "Unknown").strip()
+                artist = (e.get("uploader") or e.get("channel") or "YouTube Music").strip()
+                items.append({
+                    "id": f"yt_{yt_id}",
+                    "fileId": f"yt_{yt_id}",
+                    "title": title,
+                    "artist": artist,
+                    "duration": int(dur),
+                    "imageInfo": {"imageUrl": self._extract_cover(e)},
+                    "url": f"https://www.youtube.com/watch?v={yt_id}",
+                    "query_str": f"{artist} - {title}",
+                    "source": "yt",
+                })
 
         pages_all = page + 1 if len(items) >= per_page else page
         res = {"items": items, "paginationInfo": {"lastPage": pages_all}}
@@ -170,44 +218,86 @@ class SoundCloudClient:
         return await self.search_track("popular music", page=page)
 
     async def get_track_info(self, track_id: str) -> Optional[dict]:
-        track_id = _clean_sc_id(track_id)
-        sc_url = f"https://api.soundcloud.com/tracks/{track_id}"
-        ydl_opts = {**self._ydl_opts(), "extract_flat": False,
-                    "format": "http_mp3_0_0/bestaudio[protocol=http]/bestaudio[ext=mp3]/bestaudio/best"}
+        track_id = _clean_track_id(track_id)
         loop = asyncio.get_event_loop()
 
-        def _extract():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                return ydl.extract_info(sc_url, download=False)
+        # YouTube ????
+        if track_id.startswith("yt_"):
+            real_id = track_id[3:]
+            yt_url = f"https://www.youtube.com/watch?v={real_id}"
+            ydl_opts = {**self._ydl_opts(), "format": "ba/b[ext=m4a]/bestaudio"}
 
-        try:
-            info = await loop.run_in_executor(None, _extract)
-        except Exception:
-            info = None
-        if not info:
+            def _extract_yt():
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        return ydl.extract_info(yt_url, download=False)
+                except Exception:
+                    return None
+
+            info = await loop.run_in_executor(None, _extract_yt)
+            if not info:
+                return None
+
+            dl_url = None
+            audio_fmts = [f for f in (info.get("formats") or []) if f.get("vcodec") == "none" and f.get("url")]
+            for fmt in audio_fmts:
+                if fmt.get("ext") in ("m4a", "mp3"):
+                    dl_url = fmt.get("url")
+                    break
+            if not dl_url and audio_fmts:
+                dl_url = audio_fmts[0].get("url")
+
+            return {
+                "id": track_id,
+                "fileId": track_id,
+                "title": info.get("title") or "Unknown",
+                "artist": info.get("uploader") or info.get("channel") or "YouTube",
+                "duration": int(info.get("duration") or 0),
+                "download": dl_url,
+                "imageInfo": {"imageUrl": self._extract_cover(info)},
+                "url": yt_url,
+            }
+
+        # SoundCloud ????
+        sc_url = f"https://api.soundcloud.com/tracks/{track_id}"
+        ydl_opts = {**self._ydl_opts(), "format": "http_mp3_0_0/bestaudio[protocol=http]/bestaudio[ext=mp3]/bestaudio/best"}
+
+        def _extract_sc():
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    return ydl.extract_info(sc_url, download=False)
+            except Exception:
+                return None
+
+        info = await loop.run_in_executor(None, _extract_sc)
+
+        # ???? SoundCloud ?? ????? ?????? ???? (DRM/????) ? ???? ???????????? ?? YouTube
+        if not info or not info.get("formats") or all("preview" in f.get("format_id", "").lower() for f in (info.get("formats") or [])):
+            title_hint = info.get("title") if info else None
+            uploader_hint = info.get("uploader") if info else None
+            if title_hint:
+                fallback_query = f"{uploader_hint or ''} {title_hint}".strip()
+                yt_fallback_res = await self.search_track(fallback_query, limit=1)
+                for item in yt_fallback_res.get("items", []):
+                    if item.get("id", "").startswith("yt_"):
+                        return await self.get_track_info(item["id"])
             return None
 
         cover = self._extract_cover(info)
         dl_url = None
         formats = info.get("formats") or []
-        # ??????????????? DRM/preview ???????
         valid_formats = [f for f in formats if "preview" not in f.get("format_id", "").lower()]
-        
+
         for fmt in (valid_formats or formats):
             if fmt.get("protocol") == "http" and fmt.get("ext") in ("mp3", "m4a", None):
                 dl_url = fmt.get("url")
                 break
         if not dl_url and valid_formats:
             dl_url = valid_formats[-1].get("url")
-        elif not dl_url and formats:
-            # ???? ???????? ?????? preview ???????, ???? ??????? DRM
-            if all("preview" in f.get("format_id", "").lower() for f in formats):
-                return None
-            dl_url = formats[-1].get("url")
 
         return {
-            "id": str(info.get("id") or track_id),
-            "fileId": str(info.get("id") or track_id),
+            "id": track_id,
+            "fileId": track_id,
             "title": info.get("title") or "Unknown",
             "artist": info.get("uploader") or info.get("channel") or "SoundCloud",
             "duration": int(info.get("duration") or 0),
@@ -219,7 +309,7 @@ class SoundCloudClient:
     async def download_track(self, track_id: str, progress_cb: Optional[Callable] = None) -> io.BytesIO:
         info = await self.get_track_info(track_id)
         if not info or not info.get("download"):
-            raise ValueError(f"Нет ссылки для трека {track_id}")
+            raise ValueError("DRM_OR_NOT_FOUND")
         return await self._stream_to_buffer(info["download"], progress_cb=progress_cb)
 
     async def _stream_to_buffer(self, url: str, progress_cb: Optional[Callable] = None,
@@ -270,4 +360,6 @@ class SoundCloudClient:
         return await self._stream_to_buffer(url)
 
 
-downloader = SoundCloudClient()
+# ????????????? ?? ??????? ?????????
+SoundCloudClient = MusicClient
+downloader = MusicClient()
