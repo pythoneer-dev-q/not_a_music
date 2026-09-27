@@ -435,42 +435,9 @@ class MusicClient:
     async def top_tracks(self, page: int = 1) -> dict:
         return await self.search_track("popular music", page=page)
 
-    @staticmethod
-    def _pick_best_audio_format(formats: list) -> tuple[Optional[str], Optional[dict]]:
-        """Выбирает лучший аудиопоток с максимальным битрейтом (128-160+ kbps)."""
-        if not formats:
-            return None, None
-        audio_fmts = [
-            f for f in formats
-            if f.get("vcodec") == "none" and f.get("url")
-        ]
-        if not audio_fmts:
-            return None, None
-
-        # Предпочитаем форматы m4a/mp3 с наивысшим битрейтом
-        m4a_fmts = [f for f in audio_fmts if f.get("ext") in ("m4a", "mp3")]
-        m4a_fmts.sort(key=lambda f: f.get("abr") or 0, reverse=True)
-        if m4a_fmts:
-            chosen = m4a_fmts[0]
-            return chosen.get("url"), chosen.get("http_headers")
-
-        # Fallback: любой аудиоформат с максимальным битрейтом (например, opus/webm)
-        audio_fmts.sort(key=lambda f: f.get("abr") or 0, reverse=True)
-        chosen = audio_fmts[0]
-        return chosen.get("url"), chosen.get("http_headers")
-
     async def get_track_info(self, track_id: str) -> Optional[dict]:
         track_id = _clean_track_id(track_id)
         loop = asyncio.get_event_loop()
-
-        req_meta = None
-        try:
-            from database import music_db
-            req_meta = await music_db.get_request_by_id(track_id)
-            if not req_meta:
-                req_meta = await music_db.search_track_exists(track_id)
-        except Exception:
-            req_meta = None
 
         # Ветка YouTube
         if track_id.startswith("yt_"):
@@ -489,55 +456,50 @@ class MusicClient:
             if not info:
                 return None
 
-            dl_url, dl_headers = self._pick_best_audio_format(info.get("formats") or [])
-            if not dl_url:
-                return None
+            dl_url = None
+            audio_fmts = [f for f in (info.get("formats") or []) if f.get("vcodec") == "none" and f.get("url")]
+            for fmt in audio_fmts:
+                if fmt.get("ext") in ("m4a", "mp3"):
+                    dl_url = fmt.get("url")
+                    break
+            if not dl_url and audio_fmts:
+                dl_url = audio_fmts[0].get("url")
 
             return {
                 "id": track_id,
                 "fileId": track_id,
-                "title": info.get("title") or (req_meta.get("title") if req_meta else "Unknown"),
-                "artist": info.get("uploader") or info.get("channel") or (req_meta.get("artist") if req_meta else "YouTube"),
-                "duration": int(info.get("duration") or (req_meta.get("duration") if req_meta else 0)),
+                "title": info.get("title") or "Unknown",
+                "artist": info.get("uploader") or info.get("channel") or "YouTube",
+                "duration": int(info.get("duration") or 0),
                 "download": dl_url,
-                "headers": dl_headers,
                 "imageInfo": {"imageUrl": self._extract_cover(info)},
                 "url": yt_url,
             }
 
-        sc_url = (req_meta.get("url") if req_meta else None) or f"https://api.soundcloud.com/tracks/{track_id}"
+        sc_url = f"https://api.soundcloud.com/tracks/{track_id}"
         ydl_opts = {**self._ydl_opts(), "format": "http_mp3_0_0/bestaudio[protocol=http]/bestaudio[ext=mp3]/bestaudio/best"}
 
         def _extract_sc():
-            urls = [sc_url]
-            fallback_api = f"https://api.soundcloud.com/tracks/{track_id}"
-            if fallback_api not in urls:
-                urls.append(fallback_api)
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                for u in urls:
-                    try:
-                        res = ydl.extract_info(u, download=False)
-                        if res:
-                            return res
-                    except Exception:
-                        continue
-            return None
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    return ydl.extract_info(sc_url, download=False)
+            except Exception:
+                return None
 
         info = await loop.run_in_executor(None, _extract_sc)
 
+        # Если SoundCloud отдал только обрезанную версию (DRM/SoundCloud Go+) —
+        # ищем полноценный трек на YouTube.
         formats = (info.get("formats") or []) if info else []
-        is_drm_or_preview = (
-            (not info) or
-            (not formats) or
-            all("preview" in f.get("format_id", "").lower() for f in formats)
-        )
+        is_drm_or_preview = (not info) or (not formats) or all("preview" in f.get("format_id", "").lower() for f in formats)
 
         if is_drm_or_preview:
-            # Обход DRM SoundCloud Go+: подбираем полную версию на YouTube с высоким качеством
-            title_hint = (info.get("title") if info else None) or (req_meta.get("title") if req_meta else "") or ""
-            uploader_hint = (info.get("uploader") if info else None) or (req_meta.get("artist") if req_meta else "") or ""
+            # Обход DRM SoundCloud Go+: подбираем полную версию на YouTube
+            title_hint = (info.get("title") if info else None) or ""
+            uploader_hint = (info.get("uploader") if info else None) or ""
             fallback_query = f"{uploader_hint} {title_hint}".strip()
-
+            if not fallback_query and req_meta:
+                fallback_query = f"{req_meta.get('artist', '')} {req_meta.get('title', '')}".strip()
             if fallback_query:
                 yt_opts = {**self._ydl_opts(), "format": "ba/b[ext=m4a]/bestaudio"}
                 def _yt_direct_find():
@@ -551,23 +513,33 @@ class MusicClient:
 
                 yt_entry = await loop.run_in_executor(None, _yt_direct_find)
                 if yt_entry:
-                    dl_url, dl_headers = self._pick_best_audio_format(yt_entry.get("formats") or [])
+                    audio_fmts = [
+                        f for f in (yt_entry.get("formats") or [])
+                        if f.get("vcodec") == "none" and f.get("url") and f.get("ext") in ("m4a", "webm", "mp3")
+                    ]
+                    dl_url = None
+                    for fmt in audio_fmts:
+                        if fmt.get("ext") in ("m4a", "mp3"):
+                            dl_url = fmt.get("url")
+                            break
+                    if not dl_url and audio_fmts:
+                        dl_url = audio_fmts[0].get("url")
+
                     if dl_url:
                         return {
                             "id": track_id,
                             "fileId": track_id,
                             "title": yt_entry.get("title") or title_hint or "Unknown",
                             "artist": yt_entry.get("uploader") or uploader_hint or "YouTube",
-                            "duration": int(yt_entry.get("duration") or (info.get("duration") if info else 0)),
+                            "duration": int(yt_entry.get("duration") or info.get("duration") or 0),
                             "download": dl_url,
-                            "headers": dl_headers,
                             "imageInfo": {"imageUrl": self._extract_cover(yt_entry)},
                             "url": f"https://www.youtube.com/watch?v={yt_entry.get('id')}",
                         }
             return None
-
         cover = self._extract_cover(info)
         dl_url = None
+        formats = info.get("formats") or []
         valid_formats = [f for f in formats if "preview" not in f.get("format_id", "").lower()]
 
         for fmt in (valid_formats or formats):
@@ -580,11 +552,10 @@ class MusicClient:
         return {
             "id": track_id,
             "fileId": track_id,
-            "title": info.get("title") or (req_meta.get("title") if req_meta else "Unknown"),
-            "artist": info.get("uploader") or info.get("channel") or (req_meta.get("artist") if req_meta else "SoundCloud"),
-            "duration": int(info.get("duration") or (req_meta.get("duration") if req_meta else 0)),
+            "title": info.get("title") or "Unknown",
+            "artist": info.get("uploader") or info.get("channel") or "SoundCloud",
+            "duration": int(info.get("duration") or 0),
             "download": dl_url,
-            "headers": None,
             "imageInfo": {"imageUrl": cover},
             "url": info.get("webpage_url") or sc_url,
         }
@@ -593,34 +564,22 @@ class MusicClient:
         info = await self.get_track_info(track_id)
         if not info or not info.get("download"):
             raise ValueError("DRM_OR_NOT_FOUND")
-        headers = info.get("headers")
-        return await self._stream_to_buffer(info["download"], progress_cb=progress_cb, headers=headers)
+        return await self._stream_to_buffer(info["download"], progress_cb=progress_cb)
 
     async def _stream_to_buffer(self, url: str, progress_cb: Optional[Callable] = None,
-                                headers: Optional[dict] = None,
-                                timeout_total: int = 180) -> io.BytesIO:
-        timeout = ClientTimeout(total=timeout_total, connect=15)
-        req_headers = {
-            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/124.0.0.0 Safari/537.36"),
-            "Accept": "*/*",
-            "Accept-Encoding": "identity",
-        }
-        if headers and isinstance(headers, dict):
-            req_headers.update(headers)
-
+                                timeout_total: int = 120) -> io.BytesIO:
+        timeout = ClientTimeout(total=timeout_total, connect=10)
+        headers = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/124.0.0.0 Safari/537.36")}
         session = self._session
         own = False
         if session is None:
-            session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(family=socket.AF_INET, enable_cleanup_closed=True),
-                read_bufsize=262144
-            )
+            session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(family=socket.AF_INET))
             own = True
         buf = io.BytesIO()
         try:
-            async with session.get(url, timeout=timeout, headers=req_headers) as resp:
+            async with session.get(url, timeout=timeout, headers=headers) as resp:
                 resp.raise_for_status()
                 total = int(resp.headers.get("Content-Length") or 0)
                 downloaded = 0
