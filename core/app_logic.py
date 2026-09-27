@@ -10,6 +10,11 @@ from typing import Optional, Callable
 import aiohttp
 from aiohttp import ClientTimeout
 import yt_dlp
+class _QuietLogger:
+    def debug(self, msg): pass
+    def warning(self, msg): pass
+    def error(self, msg): pass
+
 
 
 def format_progress_bar(downloaded: int, total: int, width: int = 10) -> str:
@@ -72,12 +77,12 @@ class SoundCloudClient:
     @staticmethod
     def _ydl_opts(quiet: bool = True) -> dict:
         return {
-            "quiet": quiet,
+            "quiet": True,
             "no_warnings": True,
             "ignoreerrors": True,
+            "logger": _QuietLogger(),
             "socket_timeout": 10,
             "retries": 2,
-            "extract_flat": True,
             "skip_download": True,
             "lazy_extractors": True,
             "nocheckcertificate": True,
